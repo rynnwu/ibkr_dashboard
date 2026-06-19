@@ -10,5 +10,11 @@
   reference in the future.
 - minor changes, bug fixed may not impact design, your call, update or not.
 
+# debug
+- read `DEBUG.md` first.
+- once bug fixed and confirmed by user, ask user if needs to update `DEBUG.md`,
+  which means, don't update DEBUG.md automatically except you 99.9% fixed
+  trivial bugs and worth to note.
+
 # ibkr gateway permission
 - forbidden to send any `write` permission request.

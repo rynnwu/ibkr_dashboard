@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import DonutChart from "./components/DonutChart";
 import { fetchPortfolio } from "./api";
 import type { PortfolioResponse } from "./types";
@@ -12,13 +12,22 @@ export default function App() {
   const [view, setView] = useState<"byUnd" | "byPos">("byUnd");
   const [hoveredUnd, setHoveredUnd] = useState<string | null>(null);
 
+  // A portfolio fetch takes ~2 min and opens a gateway connection; guard
+  // against overlapping loads (React StrictMode double-invokes this effect,
+  // and the user can re-click 重試/refresh) so we don't stack requests.
+  const inFlight = useRef(false);
   const load = useCallback(() => {
+    if (inFlight.current) return;
+    inFlight.current = true;
     setLoading(true);
     setError(null);
     fetchPortfolio()
       .then(setData)
       .catch((e: Error) => setError(e.message))
-      .finally(() => setLoading(false));
+      .finally(() => {
+        setLoading(false);
+        inFlight.current = false;
+      });
   }, []);
 
   // eslint-disable-next-line react-hooks/set-state-in-effect -- async fetch-on-mount; setState calls happen inside promise callbacks, not synchronously in the effect body

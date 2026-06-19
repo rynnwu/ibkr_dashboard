@@ -155,6 +155,16 @@ These were all discovered running against a live gateway; the fixes live in
   produces garbage (e.g. Black-Scholes returning ~500% IV). Both underlying
   and option marks are explicitly `math.isnan`-guarded; a position with no
   usable price is dropped into `warnings`, not shown with junk numbers.
+- **G8 — clientId collisions look like "gateway down".** Each request opens its
+  own connection, but with a *fixed* clientId two overlapping connects collide:
+  IB returns `Error 326 "client id is already in use"` and ib_insync then hangs
+  until the connect timeout, surfacing as a misleading **503 "無法連線到 IB
+  Gateway"** even though the gateway is up. The trigger is the frontend firing
+  two requests at once — React `<StrictMode>` double-invokes the mount effect,
+  and rapid 重試/refresh does the same (each request is ~2 min, so they overlap
+  easily). Fix is two-layer: `ibkr_client.connect()` tries the configured
+  clientId then falls back to random ids until one is free; `App.tsx` guards
+  against concurrent loads. See [`DEBUG.md`](DEBUG.md) §4 for the reproduction.
 
 ## 8. Running it
 

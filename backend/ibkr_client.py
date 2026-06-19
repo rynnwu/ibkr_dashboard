@@ -5,6 +5,7 @@ configured host/port. Never calls any order-placement method.
 """
 import asyncio
 import math
+import random
 
 from ib_insync import IB, Stock, Option, Position, Ticker
 
@@ -20,7 +21,7 @@ def mark_price(ticker: Ticker) -> float:
     return ticker.close
 
 
-def connect(host: str, port: int, client_id: int, timeout: float = 10.0) -> IB:
+def connect(host: str, port: int, client_id: int, timeout: float = 10.0, attempts: int = 4) -> IB:
     # ib_insync is asyncio-based and requires an event loop bound to the
     # current thread. FastAPI runs sync `def` routes in a worker thread
     # (via anyio's threadpool), which has no event loop by default.
@@ -29,13 +30,28 @@ def connect(host: str, port: int, client_id: int, timeout: float = 10.0) -> IB:
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
 
-    ib = IB()
-    ib.connect(host, port, clientId=client_id, timeout=timeout, readonly=True)
-    # Fall back to delayed market data when the account has no live-data
-    # subscription for a symbol (type 3 = delayed); live data is still used
-    # automatically wherever a subscription does exist.
-    ib.reqMarketDataType(3)
-    return ib
+    # Each request opens its own connection, but a fixed clientId collides when
+    # two connects overlap (React StrictMode double-fetch, rapid refresh) or a
+    # previous connection lingers on the gateway: IB returns Error 326
+    # "client id is already in use" and ib_insync then hangs until the connect
+    # timeout, surfacing as a misleading "can't connect to gateway" 503. So try
+    # the configured id first (the common single-request case), then fall back
+    # to random ids until one is free.
+    candidate_ids = [client_id] + [random.randint(1000, 9999) for _ in range(attempts - 1)]
+    last_exc: Exception | None = None
+    for cid in candidate_ids:
+        ib = IB()
+        try:
+            ib.connect(host, port, clientId=cid, timeout=timeout, readonly=True)
+            # Fall back to delayed market data when the account has no live-data
+            # subscription for a symbol (type 3 = delayed); live data is still
+            # used automatically wherever a subscription does exist.
+            ib.reqMarketDataType(3)
+            return ib
+        except Exception as exc:  # noqa: BLE001 - retry on any connect failure
+            last_exc = exc
+            ib.disconnect()
+    raise last_exc  # type: ignore[misc]
 
 
 def fetch_positions(ib: IB) -> list[Position]:
