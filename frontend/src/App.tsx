@@ -21,6 +21,7 @@ export default function App() {
       .finally(() => setLoading(false));
   }, []);
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- async fetch-on-mount; setState calls happen inside promise callbacks, not synchronously in the effect body
   useEffect(() => { load(); }, [load]);
 
   const bg = "#070b14", card = "#0c1422", border = "#1a2d45", text = "#c8ddf0", muted = "#4a7a9a", accent = "#2a6fb8", mono = "'JetBrains Mono','Fira Code',monospace";
@@ -91,8 +92,8 @@ export default function App() {
             style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer", background: hoveredUnd === u.symbol ? "#1a2d45" : "transparent", borderRadius: 3, padding: "2px 8px" }}>
             {u.iconUrl && <img src={u.iconUrl} alt={u.symbol} width={14} height={14} style={{ borderRadius: 2 }} />}
             <span style={{ color: muted, fontSize: 9 }}>{u.symbol}</span>
-            <span style={{ color: "#607888", fontSize: 9 }}>{((u.notional / data.totalNotional) * 100).toFixed(1)}%N</span>
-            <span style={{ color: "#506070", fontSize: 9 }}>/{((u.exposure / data.totalExposure) * 100).toFixed(1)}%E</span>
+            <span style={{ color: "#607888", fontSize: 9 }}>{data.totalNotional !== 0 ? ((u.notional / data.totalNotional) * 100).toFixed(1) + "%N" : "—"}</span>
+            <span style={{ color: "#506070", fontSize: 9 }}>/{data.totalExposure !== 0 ? ((u.exposure / data.totalExposure) * 100).toFixed(1) + "%E" : "—"}</span>
           </div>
         ))}
       </div>
@@ -118,10 +119,10 @@ export default function App() {
                       <span style={{ color: "#c0d8f0", fontWeight: 600 }}>{u.symbol}</span>
                     </td>
                     <td style={{ padding: "5px 10px", textAlign: "right", color: "#a0c0e0" }}>${fmt(u.notional)}</td>
-                    <td style={{ padding: "5px 10px", textAlign: "right", color: muted }}>{((u.notional / data.totalNotional) * 100).toFixed(1)}%</td>
+                    <td style={{ padding: "5px 10px", textAlign: "right", color: muted }}>{data.totalNotional !== 0 ? ((u.notional / data.totalNotional) * 100).toFixed(1) + "%" : "—"}</td>
                     <td style={{ padding: "5px 10px", textAlign: "right", color: "#a0c0e0" }}>${fmt(u.exposure)}</td>
-                    <td style={{ padding: "5px 10px", textAlign: "right", color: muted }}>{((u.exposure / data.totalExposure) * 100).toFixed(1)}%</td>
-                    <td style={{ padding: "5px 10px", textAlign: "right" }}>{(disc * 100).toFixed(1)}%</td>
+                    <td style={{ padding: "5px 10px", textAlign: "right", color: muted }}>{data.totalExposure !== 0 ? ((u.exposure / data.totalExposure) * 100).toFixed(1) + "%" : "—"}</td>
+                    <td style={{ padding: "5px 10px", textAlign: "right" }}>{u.notional !== 0 ? (disc * 100).toFixed(1) + "%" : "—"}</td>
                   </tr>
                 );
               })}

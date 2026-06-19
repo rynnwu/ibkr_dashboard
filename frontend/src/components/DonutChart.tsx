@@ -22,11 +22,13 @@ export default function DonutChart({ data, total, title, subtitle, nlv, colorFor
   const cx = 160, cy = 160, outerR = 128, innerR = 70;
   const slices: Array<SliceDatum & { frac: number; sa: number; ea: number; mid: number }> = [];
   let angle = -Math.PI / 2;
-  data.forEach((d) => {
-    const frac = d.val / total, sa = angle, ea = angle + frac * 2 * Math.PI, mid = (sa + ea) / 2;
-    slices.push({ ...d, frac, sa, ea, mid });
-    angle = ea;
-  });
+  if (total !== 0) {
+    data.forEach((d) => {
+      const frac = d.val / total, sa = angle, ea = angle + frac * 2 * Math.PI, mid = (sa + ea) / 2;
+      slices.push({ ...d, frac, sa, ea, mid });
+      angle = ea;
+    });
+  }
   const pol = (a: number, r: number): [number, number] => [cx + r * Math.cos(a), cy + r * Math.sin(a)];
   const arc = (sa: number, ea: number, r: number, R: number) => {
     const lg = ea - sa > Math.PI ? 1 : 0;
@@ -61,7 +63,7 @@ export default function DonutChart({ data, total, title, subtitle, nlv, colorFor
         })}
         <text x={cx} y={cy - 10} textAnchor="middle" fill="#c8ddf0" fontSize={13} fontFamily="'JetBrains Mono',monospace" fontWeight="700">{fmtM(total)}</text>
         <text x={cx} y={cy + 8} textAnchor="middle" fill="#4a7a9a" fontSize={9} fontFamily="'JetBrains Mono',monospace">{subtitle}</text>
-        <text x={cx} y={cy + 22} textAnchor="middle" fill="#3a6a8a" fontSize={9} fontFamily="'JetBrains Mono',monospace">{(total / nlv).toFixed(2)}× NLV</text>
+        <text x={cx} y={cy + 22} textAnchor="middle" fill="#3a6a8a" fontSize={9} fontFamily="'JetBrains Mono',monospace">{nlv !== 0 ? (total / nlv).toFixed(2) + "× NLV" : "—"}</text>
       </svg>
     </div>
   );
