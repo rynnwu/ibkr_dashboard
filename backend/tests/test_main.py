@@ -1,5 +1,8 @@
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 from backend import main
+from backend import config as config_module
 
 
 def test_portfolio_endpoint_returns_503_when_gateway_unreachable(monkeypatch):
@@ -38,3 +41,111 @@ def test_build_portfolio_response_shape():
     assert result["totalNotional"] == 78568.0
     assert "netDelta" in result
     assert result["warnings"] == []
+
+
+def _fake_cfg(leveraged_etf_map=None, dividend_yield=None, risk_free_rate=0.0425):
+    return config_module.Config(
+        leveraged_etf_map=leveraged_etf_map or {},
+        risk_free_rate=risk_free_rate,
+        ib_gateway_host="127.0.0.1", ib_gateway_port=4001, ib_gateway_client_id=7,
+        logo_api_provider="", logo_api_key="",
+        _dividend_yield=dividend_yield or {},
+    )
+
+
+def test_position_to_record_plain_stock(monkeypatch):
+    contract = SimpleNamespace(secType="STK", symbol="AAPL")
+    pos = SimpleNamespace(contract=contract, position=10)
+    monkeypatch.setattr(main.ibkr_client, "fetch_underlying_price", lambda ib, symbol, **k: 200.0)
+    record = main._position_to_record(ib=None, pos=pos, cfg=_fake_cfg())
+    assert record["type"] == "STK"
+    assert record["underlying"] == "AAPL"
+    assert record["notional"] == 2000.0
+    assert record["exposure"] == 2000.0
+    assert record["discount"] == 0.0
+    assert record["delta"] == 1.0
+    assert record["iv"] is None
+
+
+def test_position_to_record_leveraged_etf(monkeypatch):
+    contract = SimpleNamespace(secType="STK", symbol="TSLL")
+    pos = SimpleNamespace(contract=contract, position=100)
+    monkeypatch.setattr(main.ibkr_client, "fetch_underlying_price", lambda ib, symbol, **k: 20.0)
+    cfg = _fake_cfg(leveraged_etf_map={"TSLL": {"underlying": "TSLA", "multiplier": 2}})
+    record = main._position_to_record(ib=None, pos=pos, cfg=cfg)
+    assert record["underlying"] == "TSLA"
+    assert record["notional"] == 4000.0  # 100 * 20.0 * 2
+    assert record["exposure"] == 4000.0
+    assert record["discount"] == 0.0
+    assert record["delta"] == 2.0
+
+
+def test_position_to_record_option_uses_model_greeks_when_available(monkeypatch):
+    contract = SimpleNamespace(
+        secType="OPT", symbol="TSLA", strike=200.0, right="C",
+        lastTradeDateOrContractMonth="20261016",
+    )
+    pos = SimpleNamespace(contract=contract, position=1)
+    fake_ticker = SimpleNamespace(
+        modelGreeks=SimpleNamespace(delta=0.6, theta=-0.5, vega=0.3, impliedVol=0.45),
+        marketPrice=lambda: 10.0,
+    )
+    monkeypatch.setattr(main.ibkr_client, "fetch_underlying_price", lambda ib, symbol, **k: 210.0)
+    monkeypatch.setattr(main.ibkr_client, "fetch_option_market_data", lambda ib, contract, **k: fake_ticker)
+    record = main._position_to_record(ib=None, pos=pos, cfg=_fake_cfg())
+    assert record["type"] == "COPT"
+    assert record["delta"] == 0.6
+    assert record["theta"] == -0.5
+    assert record["vega"] == 0.3
+    assert record["iv"] == 45.0
+    assert record["notional"] == 21000.0  # 1 * 100 * 210.0
+    assert record["exposure"] == 21000.0 * 0.6
+
+
+def test_position_to_record_option_falls_back_to_black_scholes_when_no_model_greeks(monkeypatch):
+    from datetime import date, timedelta
+    expiry_str = (date.today() + timedelta(days=30)).strftime("%Y%m%d")
+    contract = SimpleNamespace(
+        secType="OPT", symbol="TSLA", strike=200.0, right="C",
+        lastTradeDateOrContractMonth=expiry_str,
+    )
+    pos = SimpleNamespace(contract=contract, position=1)
+    fake_ticker = SimpleNamespace(modelGreeks=None, marketPrice=lambda: 15.0)
+    monkeypatch.setattr(main.ibkr_client, "fetch_underlying_price", lambda ib, symbol, **k: 210.0)
+    monkeypatch.setattr(main.ibkr_client, "fetch_option_market_data", lambda ib, contract, **k: fake_ticker)
+    record = main._position_to_record(ib=None, pos=pos, cfg=_fake_cfg())
+    assert record["type"] == "COPT"
+    assert record["iv"] is not None
+    assert 0.0 < record["delta"] < 1.0
+
+
+def test_position_to_record_put_option_type_is_popt(monkeypatch):
+    contract = SimpleNamespace(
+        secType="OPT", symbol="TSLA", strike=200.0, right="P",
+        lastTradeDateOrContractMonth="20261016",
+    )
+    pos = SimpleNamespace(contract=contract, position=1)
+    fake_ticker = SimpleNamespace(
+        modelGreeks=SimpleNamespace(delta=-0.4, theta=-0.3, vega=0.2, impliedVol=0.5),
+        marketPrice=lambda: 8.0,
+    )
+    monkeypatch.setattr(main.ibkr_client, "fetch_underlying_price", lambda ib, symbol, **k: 210.0)
+    monkeypatch.setattr(main.ibkr_client, "fetch_option_market_data", lambda ib, contract, **k: fake_ticker)
+    record = main._position_to_record(ib=None, pos=pos, cfg=_fake_cfg())
+    assert record["type"] == "POPT"
+    assert record["delta"] == -0.4
+
+
+def test_years_to_expiry_future_date_is_roughly_expected_fraction():
+    from datetime import date, timedelta
+    future = date.today() + timedelta(days=365)
+    expiry_str = future.strftime("%Y%m%d")
+    fraction = main._years_to_expiry(expiry_str)
+    assert 0.99 <= fraction <= 1.01
+
+
+def test_years_to_expiry_past_or_today_is_floored_to_one_day():
+    from datetime import date
+    today_str = date.today().strftime("%Y%m%d")
+    fraction = main._years_to_expiry(today_str)
+    assert fraction == 1 / 365.0

@@ -1,14 +1,19 @@
+import logging
+from datetime import date
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from ib_insync import IB, Position
 
 from backend import calc, config, ibkr_client, icons
 
 app = FastAPI()
 CONFIG_PATH = Path(__file__).parent / "config.json"
+logger = logging.getLogger(__name__)
 
 
 def build_portfolio_response(positions: list[dict], nlv: float, icon_lookup: dict, warnings: list[str]) -> dict:
+    """Assembles the full portfolio API payload (totals, leverage, greeks, per-underlying rows) from position records."""
     underlying_rows = calc.aggregate_by_underlying(positions)
     total_notional = sum(row["notional"] for row in underlying_rows)
     total_exposure = sum(row["exposure"] for row in underlying_rows)
@@ -52,7 +57,8 @@ def build_portfolio_response(positions: list[dict], nlv: float, icon_lookup: dic
 
 
 @app.get("/api/portfolio")
-def get_portfolio():
+def get_portfolio() -> dict:
+    """Connects to IB Gateway and returns the full portfolio response payload."""
     cfg = config.load_config(CONFIG_PATH)
     try:
         ib = ibkr_client.connect(cfg.ib_gateway_host, cfg.ib_gateway_port, cfg.ib_gateway_client_id)
@@ -73,7 +79,7 @@ def get_portfolio():
     return build_portfolio_response(raw_positions, nlv, icon_lookup, warnings)
 
 
-def _collect_positions(ib, cfg) -> tuple[list[dict], list[str]]:
+def _collect_positions(ib: IB, cfg: config.Config) -> tuple[list[dict], list[str]]:
     """Pulls raw ib_insync positions, resolves underlying prices/Greeks, and
     returns calc-ready position dicts plus any per-symbol warnings."""
     positions = []
@@ -82,11 +88,13 @@ def _collect_positions(ib, cfg) -> tuple[list[dict], list[str]]:
         try:
             positions.append(_position_to_record(ib, pos, cfg))
         except Exception as exc:
+            logger.exception("Failed to convert position %s to record", pos.contract.symbol)
             warnings.append(f"{pos.contract.symbol}: {exc}")
     return positions, warnings
 
 
-def _position_to_record(ib, pos, cfg) -> dict:
+def _position_to_record(ib: IB, pos: Position, cfg: config.Config) -> dict:
+    """Builds a calc-ready dict for one IB position, branching on option vs. leveraged-ETF vs. plain stock."""
     contract = pos.contract
     if contract.secType == "OPT":
         underlying_price = ibkr_client.fetch_underlying_price(ib, contract.symbol)
@@ -132,7 +140,7 @@ def _position_to_record(ib, pos, cfg) -> dict:
 
 
 def _years_to_expiry(expiry_str: str) -> float:
-    from datetime import date
+    """Converts an IB-format YYYYMMDD expiry string into a year fraction from today (floored at 1/365)."""
     expiry = date(int(expiry_str[:4]), int(expiry_str[4:6]), int(expiry_str[6:8]))
     days = max((expiry - date.today()).days, 1)
     return days / 365.0
