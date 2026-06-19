@@ -9,8 +9,11 @@ per position and per underlying, sourced live from IBKR via IB Gateway.
    In Configure → Settings → API → Settings: enable "ActiveX and Socket
    Clients" and check "Read-Only API". Port 4001 = live, 4002 = paper.
 2. (Optional, for real logos) an API key from the logo provider configured
-   in `backend/config.json` under `logo_api.api_key`. Without a key, every
-   symbol falls back to a generated text icon — the dashboard still works.
+   in `backend/config.json` under `logo_api.api_key`. The shipped config
+   already has a placeholder (`"enabled"`) that turns on real logo fetching
+   by default — no signup/account needed for the current provider
+   (financialmodelingprep's keyless image endpoint). To disable real logos
+   and force text-fallback icons, set `logo_api.api_key` to an empty string `""`.
 
 ## Run
 

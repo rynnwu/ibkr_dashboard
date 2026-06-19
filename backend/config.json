@@ -12,5 +12,5 @@
   },
   "risk_free_rate": 0.0425,
   "ib_gateway": {"host": "127.0.0.1", "port": 4001, "client_id": 7},
-  "logo_api": {"provider": "eodhd", "api_key": ""}
+  "logo_api": {"provider": "financialmodelingprep", "api_key": "enabled"}
 }
