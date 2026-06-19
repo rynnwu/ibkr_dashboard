@@ -86,26 +86,42 @@ def get_portfolio() -> dict:
 
 def _collect_positions(ib: IB, cfg: config.Config) -> tuple[list[dict], list[str]]:
     """Pulls raw ib_insync positions, resolves underlying prices/Greeks, and
-    returns calc-ready position dicts plus any per-symbol warnings."""
+    returns calc-ready position dicts plus any per-symbol warnings.
+
+    Market data for the *whole* portfolio is fetched in one batched call
+    (ibkr_client.fetch_market_data) before the per-position loop, so the loop
+    itself is pure CPU work — no serial per-position network waits (DESIGN §9)."""
+    raw_positions = list(ibkr_client.fetch_positions(ib))
+    underlying_symbols = {p.contract.symbol for p in raw_positions}
+    option_contracts = [p.contract for p in raw_positions if p.contract.secType == "OPT"]
+    price_map, option_ticker_map = ibkr_client.fetch_market_data(
+        ib, underlying_symbols, option_contracts
+    )
+
     positions = []
     warnings: list[str] = []
-    for pos in ibkr_client.fetch_positions(ib):
+    for pos in raw_positions:
         try:
-            positions.append(_position_to_record(ib, pos, cfg))
+            positions.append(_position_to_record(pos, cfg, price_map, option_ticker_map))
         except Exception as exc:
             logger.exception("Failed to convert position %s to record", pos.contract.symbol)
             warnings.append(f"{pos.contract.symbol}: {exc}")
     return positions, warnings
 
 
-def _position_to_record(ib: IB, pos: Position, cfg: config.Config) -> dict:
-    """Builds a calc-ready dict for one IB position, branching on option vs. leveraged-ETF vs. plain stock."""
+def _position_to_record(
+    pos: Position, cfg: config.Config, price_map: dict, option_ticker_map: dict
+) -> dict:
+    """Builds a calc-ready dict for one IB position from pre-fetched market data,
+    branching on option vs. leveraged-ETF vs. plain stock. Pure: no I/O."""
     contract = pos.contract
+    underlying_price = price_map.get(contract.symbol, math.nan)
+    if math.isnan(underlying_price):
+        raise ValueError(f"no valid market price for {contract.symbol}")
     if contract.secType == "OPT":
-        underlying_price = ibkr_client.fetch_underlying_price(ib, contract.symbol)
-        if math.isnan(underlying_price):
-            raise ValueError(f"no valid market price for {contract.symbol}")
-        ticker = ibkr_client.fetch_option_market_data(ib, contract)
+        ticker = option_ticker_map.get(contract.conId)
+        if ticker is None:
+            raise ValueError(f"no option market data for {contract.localSymbol}")
         notional = calc.option_notional(pos.position, underlying_price)
         if ticker.modelGreeks and ticker.modelGreeks.delta is not None:
             delta = ticker.modelGreeks.delta
@@ -133,9 +149,7 @@ def _position_to_record(ib: IB, pos: Position, cfg: config.Config) -> dict:
         }
 
     mapping = cfg.leveraged_etf_map.get(contract.symbol)
-    price = ibkr_client.fetch_underlying_price(ib, contract.symbol)
-    if math.isnan(price):
-        raise ValueError(f"no valid market price for {contract.symbol}")
+    price = underlying_price
     if mapping:
         notional = calc.leveraged_etf_notional(pos.position, price, mapping["multiplier"])
         underlying = mapping["underlying"]

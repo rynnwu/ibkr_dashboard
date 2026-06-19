@@ -7,6 +7,8 @@ import asyncio
 import math
 import random
 
+from collections.abc import Iterable
+
 from ib_insync import IB, Stock, Option, Position, Ticker
 
 
@@ -65,31 +67,61 @@ def fetch_nlv(ib: IB) -> float:
     raise ValueError("NetLiquidation not found in account summary")
 
 
-def fetch_underlying_price(ib: IB, symbol: str, exchange: str = "SMART", currency: str = "USD") -> float:
-    contract = Stock(symbol, exchange, currency)
-    ib.qualifyContracts(contract)
-    ticker = ib.reqMktData(contract, "", snapshot=True)
-    try:
-        ib.sleep(2.0)
-        return mark_price(ticker)
-    finally:
-        ib.cancelMktData(contract)
+def fetch_market_data(
+    ib: IB,
+    underlying_symbols: Iterable[str],
+    option_contracts: list[Option],
+    timeout: float = 8.0,
+    exchange: str = "SMART",
+    currency: str = "USD",
+) -> tuple[dict[str, float], dict[int, Ticker]]:
+    """Batch-fetch every underlying price and option ticker for the whole
+    portfolio in a *single* bounded wait, and return:
 
+      - ``price_map``: {underlying symbol -> mark price (float, NaN if none)}
+      - ``option_ticker_map``: {option conId -> Ticker}
 
-def fetch_option_market_data(ib: IB, option_contract: Option, timeout: float = 4.0) -> Ticker:
-    """Returns the ib_insync Ticker via a one-time snapshot.
+    Why batched: ib_insync is asyncio-based, so we can fire all snapshot
+    `reqMktData` requests up front and then wait *once* for replies to stream
+    in concurrently. The old per-position approach paid a separate ~2-6s
+    `ib.sleep` for each position serially (DESIGN §9); here the dominant cost
+    collapses to one `timeout` for the entire request. Underlyings are also
+    deduplicated, so an option and its stock share one price fetch.
 
     A plain snapshot (no genericTickList="106" option-computation tick) avoids
     the live-OPRA-subscription requirement, so with delayed market data enabled
-    it still yields a mark price for accounts without an options data feed.
-    modelGreeks is therefore typically None here, and the caller falls back to
-    calc.implied_vol/calc.bs_greeks computed from the snapshot mark price."""
-    if not option_contract.exchange:
-        option_contract.exchange = "SMART"
-    ib.qualifyContracts(option_contract)
-    ticker = ib.reqMktData(option_contract, "", snapshot=True)
+    it still yields a mark price for accounts without an options data feed
+    (DESIGN G4). modelGreeks is therefore typically None on option tickers, and
+    the caller falls back to calc.implied_vol/calc.bs_greeks off the mark.
+
+    A single bounded `ib.sleep` is used instead of `ib.reqTickers`, because the
+    latter waits on *every* snapshot with no timeout and would hang forever if
+    one option's snapshot never ends (the common non-OPRA case)."""
+    symbols = list(underlying_symbols)
+    stock_contracts = [Stock(s, exchange, currency) for s in symbols]
+    for c in option_contracts:
+        # Option contracts from positions() carry no exchange; reqMktData needs
+        # one or IB returns "Please enter exchange" (DESIGN G5).
+        if not c.exchange:
+            c.exchange = exchange
+
+    all_contracts: list = [*stock_contracts, *option_contracts]
+    if not all_contracts:
+        return {}, {}
+
+    # qualifyContracts only logs+skips unknown contracts (never raises), so a
+    # bad symbol just ends up with a NaN price and is isolated downstream.
+    ib.qualifyContracts(*all_contracts)
+    tickers = [ib.reqMktData(c, "", snapshot=True) for c in all_contracts]
     try:
         ib.sleep(timeout)
-        return ticker
     finally:
-        ib.cancelMktData(option_contract)
+        for c in all_contracts:
+            ib.cancelMktData(c)
+
+    n = len(stock_contracts)
+    price_map = {sym: mark_price(t) for sym, t in zip(symbols, tickers[:n])}
+    # Position contracts always carry a conId from IB, so keying by conId is
+    # stable even before qualification.
+    option_ticker_map = {c.conId: t for c, t in zip(option_contracts, tickers[n:])}
+    return price_map, option_ticker_map

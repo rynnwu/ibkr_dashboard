@@ -60,8 +60,8 @@ is on-demand, not realtime.
 | `backend/config.py` | Load + expose `config.json` as a `Config` dataclass. | `dividend_yield_for(sym)` defaults to 0. |
 | `backend/config.json` | Runtime config (no secrets needed). | leveraged-ETF map, dividend yields, risk-free rate, gateway host/port/clientId, logo API. |
 | `backend/icons.py` | Per-symbol logo fetch + on-disk cache + dominant-color extraction, with a generated text-icon + hashed-color fallback. | Network call is injectable (`getter=`) so tests never hit the net. Cache: `backend/icon_cache/` (gitignored). |
-| `backend/ibkr_client.py` | **Thin `ib_insync` wrapper. The only module that does IBKR I/O.** connect / positions / NLV / underlying price / option market data / `mark_price`. | Deliberately no automated tests (needs a live gateway). **Never** calls any order/account-modifying method. |
-| `backend/main.py` | FastAPI app + the wiring: `get_portfolio` route, the pure `build_portfolio_response`, and the I/O glue `_collect_positions` / `_position_to_record`. | Also mounts `/icons` static files (see §5, gotcha G6). |
+| `backend/ibkr_client.py` | **Thin `ib_insync` wrapper. The only module that does IBKR I/O.** connect / positions / NLV / **batched** market data (`fetch_market_data`) / `mark_price`. | Deliberately no automated tests (needs a live gateway). **Never** calls any order/account-modifying method. |
+| `backend/main.py` | FastAPI app + the wiring: `get_portfolio` route, the pure `build_portfolio_response`, the I/O glue `_collect_positions` (batch-fetches market data), and the **pure** `_position_to_record` (reads from the fetched maps). | Also mounts `/icons` static files (see §5, gotcha G6). |
 
 Tests live in `backend/tests/` (`test_calc`, `test_config`, `test_icons`,
 `test_main`) and run with `backend/.venv/bin/pytest backend/tests/`.
@@ -70,13 +70,18 @@ Tests live in `backend/tests/` (`test_calc`, `test_config`, `test_icons`,
 
 1. `connect()` → fresh `ib_insync.IB` to the gateway. On failure → HTTP **503**
    with a friendly message (frontend shows an error state + retry).
-2. `_collect_positions()` loops over `ib.positions()`. **Each position is
-   converted independently inside a try/except** — one bad symbol becomes a
-   `warnings[]` entry (and a logged traceback), it does not sink the request.
-3. `_position_to_record()` branches per position:
-   - **Option (`secType == "OPT"`):** get underlying price; get the option's
-     mark via a snapshot; if IB's native `modelGreeks` are present use them,
-     else **fall back to Black-Scholes** (`calc.implied_vol` → `calc.bs_greeks`)
+2. `_collect_positions()` reads `ib.positions()`, then makes **one batched**
+   `ibkr_client.fetch_market_data()` call for the whole portfolio (all
+   underlying prices + all option tickers in a single bounded wait — see §9 and
+   gotcha G9). It then loops the positions; **each is converted independently
+   inside a try/except** — one bad symbol becomes a `warnings[]` entry (and a
+   logged traceback), it does not sink the request.
+3. `_position_to_record()` is **pure** (no I/O): it reads the underlying price
+   from the `price_map` and, for options, the ticker from the
+   `option_ticker_map` (keyed by `conId`). It branches per position:
+   - **Option (`secType == "OPT"`):** take the underlying price + the option's
+     snapshot ticker; if IB's native `modelGreeks` are present use them, else
+     **fall back to Black-Scholes** (`calc.implied_vol` → `calc.bs_greeks`)
      off the mark. The native-first ordering is a deliberate design point.
    - **Leveraged ETF** (symbol in `leveraged_etf_map`): notional = `|qty| ×
      price × multiplier`, mapped to the underlying, delta = ±multiplier.
@@ -155,6 +160,17 @@ These were all discovered running against a live gateway; the fixes live in
   produces garbage (e.g. Black-Scholes returning ~500% IV). Both underlying
   and option marks are explicitly `math.isnan`-guarded; a position with no
   usable price is dropped into `warnings`, not shown with junk numbers.
+- **G9 — market data is batched; use a *bounded* wait, not `reqTickers`.**
+  `fetch_market_data()` fires every snapshot `reqMktData` up front and waits
+  **once** (a single `ib.sleep`) for replies to stream in concurrently — this is
+  what makes a refresh ~10s instead of ~2 min (see §9). Do **not** swap in
+  ib_insync's `ib.reqTickers`: it awaits *every* snapshot with no timeout and
+  would hang forever if one option's snapshot never ends — the common non-OPRA
+  case (G4). The bounded `ib.sleep` returns with whatever arrived; a symbol that
+  didn't price in the window degrades to a `warnings[]` entry. Underlyings are
+  deduplicated, so an option and its stock share one price fetch. The first
+  request after a (re)connect can be slower / occasionally miss a symbol while
+  IB's market-data lines warm up; it clears on the next refresh.
 - **G8 — clientId collisions look like "gateway down".** Each request opens its
   own connection, but with a *fixed* clientId two overlapping connects collide:
   IB returns `Error 326 "client id is already in use"` and ib_insync then hangs
@@ -202,9 +218,12 @@ cd frontend && npm run dev
 
 ## 9. Known limitations / next steps
 
-- **Refresh takes ~2 min.** Positions are fetched **serially**, each waiting a
-  fixed snapshot timeout. The obvious optimization is to parallelize the
-  per-position market-data requests (or batch them) — not yet done.
+- **Refresh takes ~10s** (was ~2 min). Market data for the whole portfolio is
+  fetched in **one batched call** with a single bounded wait, instead of a
+  serial per-position snapshot timeout (see §4 step 2 and gotcha G9). Remaining
+  headroom: the wait is a fixed `timeout`; a smarter version could return as
+  soon as every ticker has a usable mark rather than always sleeping the full
+  window.
 - **Options are priced off the previous close** (see G4), i.e. end-of-day, not
   intraday, unless the account has a live options data feed.
 - **One account.** No multi-account handling.

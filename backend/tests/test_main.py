@@ -92,11 +92,10 @@ def _fake_cfg(leveraged_etf_map=None, dividend_yield=None, risk_free_rate=0.0425
     )
 
 
-def test_position_to_record_plain_stock(monkeypatch):
+def test_position_to_record_plain_stock():
     contract = SimpleNamespace(secType="STK", symbol="AAPL")
     pos = SimpleNamespace(contract=contract, position=10)
-    monkeypatch.setattr(main.ibkr_client, "fetch_underlying_price", lambda ib, symbol, **k: 200.0)
-    record = main._position_to_record(ib=None, pos=pos, cfg=_fake_cfg())
+    record = main._position_to_record(pos, _fake_cfg(), {"AAPL": 200.0}, {})
     assert record["type"] == "STK"
     assert record["underlying"] == "AAPL"
     assert record["notional"] == 2000.0
@@ -107,31 +106,28 @@ def test_position_to_record_plain_stock(monkeypatch):
     assert record["quantity"] == 10
 
 
-def test_position_to_record_raises_on_nan_underlying_price(monkeypatch):
+def test_position_to_record_raises_on_nan_underlying_price():
     contract = SimpleNamespace(secType="STK", symbol="AAPL")
     pos = SimpleNamespace(contract=contract, position=10)
-    monkeypatch.setattr(main.ibkr_client, "fetch_underlying_price", lambda ib, symbol, **k: math.nan)
     with pytest.raises(ValueError):
-        main._position_to_record(ib=None, pos=pos, cfg=_fake_cfg())
+        main._position_to_record(pos, _fake_cfg(), {"AAPL": math.nan}, {})
 
 
-def test_position_to_record_option_raises_on_nan_underlying_price(monkeypatch):
+def test_position_to_record_option_raises_on_nan_underlying_price():
     contract = SimpleNamespace(
         secType="OPT", symbol="TSLA", strike=200.0, right="C",
-        lastTradeDateOrContractMonth="20261016",
+        lastTradeDateOrContractMonth="20261016", conId=1,
     )
     pos = SimpleNamespace(contract=contract, position=1)
-    monkeypatch.setattr(main.ibkr_client, "fetch_underlying_price", lambda ib, symbol, **k: math.nan)
     with pytest.raises(ValueError):
-        main._position_to_record(ib=None, pos=pos, cfg=_fake_cfg())
+        main._position_to_record(pos, _fake_cfg(), {"TSLA": math.nan}, {})
 
 
-def test_position_to_record_leveraged_etf(monkeypatch):
+def test_position_to_record_leveraged_etf():
     contract = SimpleNamespace(secType="STK", symbol="TSLL")
     pos = SimpleNamespace(contract=contract, position=100)
-    monkeypatch.setattr(main.ibkr_client, "fetch_underlying_price", lambda ib, symbol, **k: 20.0)
     cfg = _fake_cfg(leveraged_etf_map={"TSLL": {"underlying": "TSLA", "multiplier": 2}})
-    record = main._position_to_record(ib=None, pos=pos, cfg=cfg)
+    record = main._position_to_record(pos, cfg, {"TSLL": 20.0}, {})
     assert record["underlying"] == "TSLA"
     assert record["notional"] == 4000.0  # 100 * 20.0 * 2
     assert record["exposure"] == 4000.0
@@ -140,19 +136,17 @@ def test_position_to_record_leveraged_etf(monkeypatch):
     assert record["quantity"] == 100
 
 
-def test_position_to_record_option_uses_model_greeks_when_available(monkeypatch):
+def test_position_to_record_option_uses_model_greeks_when_available():
     contract = SimpleNamespace(
         secType="OPT", symbol="TSLA", strike=200.0, right="C",
-        lastTradeDateOrContractMonth="20261016",
+        lastTradeDateOrContractMonth="20261016", conId=1,
     )
     pos = SimpleNamespace(contract=contract, position=1)
     fake_ticker = SimpleNamespace(
         modelGreeks=SimpleNamespace(delta=0.6, theta=-0.5, vega=0.3, impliedVol=0.45),
         marketPrice=lambda: 10.0,
     )
-    monkeypatch.setattr(main.ibkr_client, "fetch_underlying_price", lambda ib, symbol, **k: 210.0)
-    monkeypatch.setattr(main.ibkr_client, "fetch_option_market_data", lambda ib, contract, **k: fake_ticker)
-    record = main._position_to_record(ib=None, pos=pos, cfg=_fake_cfg())
+    record = main._position_to_record(pos, _fake_cfg(), {"TSLA": 210.0}, {1: fake_ticker})
     assert record["type"] == "COPT"
     assert record["delta"] == 0.6
     assert record["theta"] == -0.5
@@ -163,39 +157,35 @@ def test_position_to_record_option_uses_model_greeks_when_available(monkeypatch)
     assert record["quantity"] == 1
 
 
-def test_position_to_record_option_falls_back_to_black_scholes_when_no_model_greeks(monkeypatch):
+def test_position_to_record_option_falls_back_to_black_scholes_when_no_model_greeks():
     from datetime import date, timedelta
     expiry_str = (date.today() + timedelta(days=30)).strftime("%Y%m%d")
     contract = SimpleNamespace(
         secType="OPT", symbol="TSLA", strike=200.0, right="C",
-        lastTradeDateOrContractMonth=expiry_str,
+        lastTradeDateOrContractMonth=expiry_str, conId=1,
     )
     pos = SimpleNamespace(contract=contract, position=1)
     fake_ticker = SimpleNamespace(modelGreeks=None, marketPrice=lambda: 15.0)
-    monkeypatch.setattr(main.ibkr_client, "fetch_underlying_price", lambda ib, symbol, **k: 210.0)
-    monkeypatch.setattr(main.ibkr_client, "fetch_option_market_data", lambda ib, contract, **k: fake_ticker)
-    record = main._position_to_record(ib=None, pos=pos, cfg=_fake_cfg())
+    record = main._position_to_record(pos, _fake_cfg(), {"TSLA": 210.0}, {1: fake_ticker})
     assert record["type"] == "COPT"
     assert record["iv"] is not None
     assert 0.0 < record["delta"] < 1.0
     assert record["quantity"] == 1
 
 
-def test_position_to_record_raises_on_nan_option_mark_price(monkeypatch):
+def test_position_to_record_raises_on_nan_option_mark_price():
     contract = SimpleNamespace(
         secType="OPT", symbol="TSLA", strike=200.0, right="C",
-        lastTradeDateOrContractMonth="20261016", localSymbol="TSLA  261016C00200000",
+        lastTradeDateOrContractMonth="20261016", localSymbol="TSLA  261016C00200000", conId=1,
     )
     pos = SimpleNamespace(contract=contract, position=1)
     # Neither a live/delayed mark nor a previous close is available.
     fake_ticker = SimpleNamespace(modelGreeks=None, marketPrice=lambda: math.nan, close=math.nan)
-    monkeypatch.setattr(main.ibkr_client, "fetch_underlying_price", lambda ib, symbol, **k: 210.0)
-    monkeypatch.setattr(main.ibkr_client, "fetch_option_market_data", lambda ib, contract, **k: fake_ticker)
     with pytest.raises(ValueError):
-        main._position_to_record(ib=None, pos=pos, cfg=_fake_cfg())
+        main._position_to_record(pos, _fake_cfg(), {"TSLA": 210.0}, {1: fake_ticker})
 
 
-def test_position_to_record_option_falls_back_to_previous_close_for_mark(monkeypatch):
+def test_position_to_record_option_falls_back_to_previous_close_for_mark():
     # No live/delayed quote (marketPrice NaN), but the previous close is
     # available — the option should still be priced off that close via the
     # Black-Scholes fallback rather than being dropped.
@@ -203,31 +193,27 @@ def test_position_to_record_option_falls_back_to_previous_close_for_mark(monkeyp
     expiry_str = (date.today() + timedelta(days=30)).strftime("%Y%m%d")
     contract = SimpleNamespace(
         secType="OPT", symbol="TSLA", strike=200.0, right="C",
-        lastTradeDateOrContractMonth=expiry_str, localSymbol="TSLA  fake",
+        lastTradeDateOrContractMonth=expiry_str, localSymbol="TSLA  fake", conId=1,
     )
     pos = SimpleNamespace(contract=contract, position=1)
     fake_ticker = SimpleNamespace(modelGreeks=None, marketPrice=lambda: math.nan, close=15.0)
-    monkeypatch.setattr(main.ibkr_client, "fetch_underlying_price", lambda ib, symbol, **k: 210.0)
-    monkeypatch.setattr(main.ibkr_client, "fetch_option_market_data", lambda ib, contract, **k: fake_ticker)
-    record = main._position_to_record(ib=None, pos=pos, cfg=_fake_cfg())
+    record = main._position_to_record(pos, _fake_cfg(), {"TSLA": 210.0}, {1: fake_ticker})
     assert record["type"] == "COPT"
     assert record["iv"] is not None
     assert 0.0 < record["delta"] < 1.0
 
 
-def test_position_to_record_put_option_type_is_popt(monkeypatch):
+def test_position_to_record_put_option_type_is_popt():
     contract = SimpleNamespace(
         secType="OPT", symbol="TSLA", strike=200.0, right="P",
-        lastTradeDateOrContractMonth="20261016",
+        lastTradeDateOrContractMonth="20261016", conId=1,
     )
     pos = SimpleNamespace(contract=contract, position=1)
     fake_ticker = SimpleNamespace(
         modelGreeks=SimpleNamespace(delta=-0.4, theta=-0.3, vega=0.2, impliedVol=0.5),
         marketPrice=lambda: 8.0,
     )
-    monkeypatch.setattr(main.ibkr_client, "fetch_underlying_price", lambda ib, symbol, **k: 210.0)
-    monkeypatch.setattr(main.ibkr_client, "fetch_option_market_data", lambda ib, contract, **k: fake_ticker)
-    record = main._position_to_record(ib=None, pos=pos, cfg=_fake_cfg())
+    record = main._position_to_record(pos, _fake_cfg(), {"TSLA": 210.0}, {1: fake_ticker})
     assert record["type"] == "POPT"
     assert record["delta"] == -0.4
     assert record["quantity"] == 1

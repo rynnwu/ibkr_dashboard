@@ -26,7 +26,7 @@ tail -60 /tmp/ibkr_piechart_backend.log
 # 4. Frontend log
 tail -20 /tmp/ibkr_piechart_frontend.log
 
-# 5. Hit the API directly, bypassing the browser/proxy (a request takes ~2 min)
+# 5. Hit the API directly, bypassing the browser/proxy (a request takes ~10s)
 curl -s -w "\nHTTP %{http_code}, %{time_total}s\n" http://127.0.0.1:8000/api/portfolio | head -c 400
 ```
 
@@ -40,10 +40,11 @@ Interpreting command 1:
 
 ## 1b. "載入中… forever" — alive or hung?
 
-**A refresh legitimately takes ~2 minutes** (DESIGN §9: positions are fetched
-*serially*, each waiting a fixed snapshot timeout; measured ~122s). So `載入中…`
-for 60–120s is **normal**, not a hang. Before assuming it's stuck, prove it's
-making progress:
+**A refresh takes ~10s** (DESIGN §9: market data is fetched in one batched call
+with a single bounded wait; gotcha G9). The first request after a gateway
+(re)connect can run longer while IB's market-data lines warm up. So `載入中…`
+for ~10–25s is **normal**, not a hang; past ~30s, suspect a real stall. Before
+assuming it's stuck, prove it's making progress:
 
 ```bash
 # 1. Both our processes alive? (start.sh names them)
@@ -66,8 +67,9 @@ for minutes → then investigate (gateway dropped, deadlock). The `Error 10091 .
 requires additional subscription` lines scrolling by are *expected* per-option
 noise (DESIGN G4), not a stall.
 
-> Slowness is by design, not a bug — see DESIGN §9 "next steps" (parallelize the
-> per-position market-data requests). Don't "fix" a 2-min load as if it's hung.
+> Market data is batched into one bounded wait (DESIGN §9, gotcha G9), so a
+> refresh is ~10s. If it's now consistently minutes, that's a regression worth
+> investigating — not the old "slow by design" behavior.
 
 ## 1c. Capturing logs for a report
 
@@ -106,7 +108,7 @@ Bisect by asking, in order:
 
 | Symptom in backend log | Root cause | Fix / status |
 |---|---|---|
-| `Error 326 ... client id is already in use` then `API connection failed: TimeoutError()` → `503` | Two `/api/portfolio` connects overlap on the **fixed clientId** (`config.json` `client_id`). React `<StrictMode>` double-invokes the mount effect → two ~2-min requests at once; rapid 重試 does the same. | **Fixed:** `ibkr_client.connect()` now tries the configured id then random fallback ids; `App.tsx` guards against concurrent loads. See §4. |
+| `Error 326 ... client id is already in use` then `API connection failed: TimeoutError()` → `503` | Two `/api/portfolio` connects overlap on the **fixed clientId** (`config.json` `client_id`). React `<StrictMode>` double-invokes the mount effect → two ~10s requests at once; rapid 重試 does the same. | **Fixed:** `ibkr_client.connect()` now tries the configured id then random fallback ids; `App.tsx` guards against concurrent loads. See §4. |
 | `API connection failed: TimeoutError()` with **no** prior 326, gateway port not listening | Gateway not running / not logged in / wrong port. | Start + log into IB Gateway (IB API mode, port 4001). Config: `config.json > ib_gateway`. |
 | `Error 10091 ... requires additional subscription` on an **Option** | Account has no live/OPRA options feed. **Expected** — not fatal. | By design (DESIGN G4): we use a plain snapshot + previous close + Black-Scholes. Position only fails if even `close` is NaN. |
 | `ValueError: no valid option mark price for ...` → that symbol in `warnings[]` | No usable mark (no live data **and** no `close`, e.g. illiquid/just-listed option). | Per-position warning, does **not** sink the request (DESIGN G7). Tolerate or add data entitlement. |
@@ -129,7 +131,7 @@ Textbook case of systematic debugging beating a guess ("gateway must be down").
   # before fix: both 503  |  after fix: both 200
   ```
 - **Fix:** unique clientId per connection with retry in `backend/ibkr_client.py`
-  + an in-flight guard in `frontend/src/App.tsx` (don't stack 2-min requests).
+  + an in-flight guard in `frontend/src/App.tsx` (don't stack overlapping requests).
 
 ## 5. Manual run (for tighter debug loops than start.sh)
 
