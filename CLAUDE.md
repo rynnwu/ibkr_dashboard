@@ -1,5 +1,6 @@
 # git
 - never commit personal information.
+- commit message in Tradition Chinese.
 
 # add, modify anything
 - read `DESIGN.md` first to understand the whole picture of this program.
