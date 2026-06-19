@@ -13,7 +13,7 @@ import requests
 from PIL import Image, ImageDraw
 
 CACHE_DIR = Path(__file__).parent / "icon_cache"
-LOGO_URL_TEMPLATE = "https://eodhd.com/img/logos/US/{symbol}.png"
+LOGO_URL_TEMPLATE = "https://images.financialmodelingprep.com/symbol/{symbol}.png"
 
 
 def hash_color(symbol: str) -> str:
@@ -43,10 +43,14 @@ def generate_text_fallback_icon(symbol: str, color: str) -> bytes:
 
 
 def fetch_logo_bytes(symbol: str, api_key: str, getter=requests.get) -> bytes | None:
+    # The logo provider (images.financialmodelingprep.com) needs no API key,
+    # but api_key is kept as a gate for backward compatibility: callers that
+    # have no key configured get the text-fallback icon instead of a fetch
+    # attempt.
     if not api_key:
         return None
     try:
-        resp = getter(LOGO_URL_TEMPLATE.format(symbol=symbol), params={"api_token": api_key}, timeout=5)
+        resp = getter(LOGO_URL_TEMPLATE.format(symbol=symbol), timeout=5)
     except requests.RequestException:
         return None
     if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image"):
