@@ -66,3 +66,33 @@ def test_bs_greeks_put_delta_between_minus1_and_0():
 def test_bs_greeks_vega_is_positive():
     g = calc.bs_greeks(S=100, K=100, T=1.0, r=0.05, q=0.0, sigma=0.20, right="C")
     assert g["vega"] > 0
+
+
+def test_aggregate_by_underlying_sums_notional_and_exposure():
+    positions = [
+        {"underlying": "TSLA", "notional": 1000.0, "exposure": 800.0},
+        {"underlying": "TSLA", "notional": 500.0, "exposure": 200.0},
+        {"underlying": "GOOG", "notional": 300.0, "exposure": 300.0},
+    ]
+    result = calc.aggregate_by_underlying(positions)
+    by_symbol = {row["underlying"]: row for row in result}
+    assert by_symbol["TSLA"]["notional"] == 1500.0
+    assert by_symbol["TSLA"]["exposure"] == 1000.0
+    assert by_symbol["GOOG"]["notional"] == 300.0
+
+
+def test_portfolio_leverage_ratios():
+    result = calc.portfolio_leverage(total_notional=200_000.0, total_exposure=100_000.0, nlv=50_000.0)
+    assert result["notional_leverage"] == pytest.approx(4.0)
+    assert result["exposure_leverage"] == pytest.approx(2.0)
+
+
+def test_greeks_card_sums_option_positions_only():
+    option_positions = [
+        {"delta_shares": 100.0, "theta": 5.0, "vega": -2.0},
+        {"delta_shares": -30.0, "theta": 1.0, "vega": 3.0},
+    ]
+    result = calc.greeks_card(option_positions)
+    assert result["net_delta"] == 70.0
+    assert result["net_theta"] == 6.0
+    assert result["net_vega"] == 1.0

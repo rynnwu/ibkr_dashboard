@@ -100,3 +100,27 @@ def bs_greeks(S: float, K: float, T: float, r: float, q: float, sigma: float, ri
         "theta": theta_annual / 365.0,  # per calendar day
         "vega": vega_full / 100.0,      # per 1 vol point (1%)
     }
+
+
+def aggregate_by_underlying(positions: list[dict]) -> list[dict]:
+    totals: dict[str, dict] = {}
+    for pos in positions:
+        row = totals.setdefault(pos["underlying"], {"underlying": pos["underlying"], "notional": 0.0, "exposure": 0.0})
+        row["notional"] += pos["notional"]
+        row["exposure"] += pos["exposure"]
+    return list(totals.values())
+
+
+def portfolio_leverage(total_notional: float, total_exposure: float, nlv: float) -> dict[str, float]:
+    return {
+        "notional_leverage": total_notional / nlv,
+        "exposure_leverage": total_exposure / nlv,
+    }
+
+
+def greeks_card(option_positions: list[dict]) -> dict[str, float]:
+    return {
+        "net_delta": sum(p["delta_shares"] for p in option_positions),
+        "net_theta": sum(p["theta"] for p in option_positions),
+        "net_vega": sum(p["vega"] for p in option_positions),
+    }
