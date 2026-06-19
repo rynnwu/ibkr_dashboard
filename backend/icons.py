@@ -34,7 +34,9 @@ def generate_text_fallback_icon(symbol: str, color: str) -> bytes:
     text = symbol[:4].upper()
     bbox = draw.textbbox((0, 0), text)
     text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    draw.text(((size - text_w) / 2, (size - text_h) / 2), text, fill="#ffffff")
+    x = (size - text_w) / 2 - bbox[0]
+    y = (size - text_h) / 2 - bbox[1]
+    draw.text((x, y), text, fill="#ffffff")
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
