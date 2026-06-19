@@ -44,6 +44,25 @@ def test_build_portfolio_response_shape():
     assert result["warnings"] == []
 
 
+def test_build_portfolio_response_icon_url_is_a_servable_web_path():
+    positions = [
+        {"label": "AAPL", "underlying": "AAPL", "type": "STK", "notional": 1000.0,
+         "exposure": 1000.0, "discount": 0.0, "delta": 1.0, "iv": None, "quantity": 10},
+    ]
+    icon_lookup = {"AAPL": ("/some/absolute/filesystem/path/icon_cache/AAPL.png", "#ff0000")}
+    result = main.build_portfolio_response(positions=positions, nlv=50000.0, icon_lookup=icon_lookup, warnings=[])
+    assert result["underlyings"][0]["iconUrl"] == "/icons/AAPL.png"
+
+
+def test_build_portfolio_response_icon_url_is_none_when_no_icon_lookup_entry():
+    positions = [
+        {"label": "ZZZZ", "underlying": "ZZZZ", "type": "STK", "notional": 500.0,
+         "exposure": 500.0, "discount": 0.0, "delta": 1.0, "iv": None, "quantity": 5},
+    ]
+    result = main.build_portfolio_response(positions=positions, nlv=50000.0, icon_lookup={}, warnings=[])
+    assert result["underlyings"][0]["iconUrl"] is None
+
+
 def test_build_portfolio_response_greeks_card_accounts_for_quantity_and_short_sign():
     positions = [
         {

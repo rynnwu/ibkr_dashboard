@@ -3,11 +3,14 @@ from datetime import date
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 from ib_insync import IB, Position
 
 from backend import calc, config, ibkr_client, icons
 
 app = FastAPI()
+icons.CACHE_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/icons", StaticFiles(directory=str(icons.CACHE_DIR)), name="icons")
 CONFIG_PATH = Path(__file__).parent / "config.json"
 logger = logging.getLogger(__name__)
 
@@ -33,12 +36,13 @@ def build_portfolio_response(positions: list[dict], nlv: float, icon_lookup: dic
     underlyings = []
     for row in underlying_rows:
         icon_path, color = icon_lookup.get(row["underlying"], (None, "#888888"))
+        icon_url = f"/icons/{row['underlying']}.png" if icon_path is not None else None
         underlyings.append({
             "symbol": row["underlying"],
             "notional": row["notional"],
             "exposure": row["exposure"],
             "color": color,
-            "iconUrl": icon_path,
+            "iconUrl": icon_url,
         })
 
     return {
