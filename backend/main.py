@@ -1,4 +1,5 @@
 import logging
+import math
 from datetime import date
 from pathlib import Path
 
@@ -102,6 +103,8 @@ def _position_to_record(ib: IB, pos: Position, cfg: config.Config) -> dict:
     contract = pos.contract
     if contract.secType == "OPT":
         underlying_price = ibkr_client.fetch_underlying_price(ib, contract.symbol)
+        if math.isnan(underlying_price):
+            raise ValueError(f"no valid market price for {contract.symbol}")
         ticker = ibkr_client.fetch_option_market_data(ib, contract)
         notional = calc.option_notional(pos.position, underlying_price)
         if ticker.modelGreeks and ticker.modelGreeks.delta is not None:
@@ -128,6 +131,8 @@ def _position_to_record(ib: IB, pos: Position, cfg: config.Config) -> dict:
 
     mapping = cfg.leveraged_etf_map.get(contract.symbol)
     price = ibkr_client.fetch_underlying_price(ib, contract.symbol)
+    if math.isnan(price):
+        raise ValueError(f"no valid market price for {contract.symbol}")
     if mapping:
         notional = calc.leveraged_etf_notional(pos.position, price, mapping["multiplier"])
         underlying = mapping["underlying"]

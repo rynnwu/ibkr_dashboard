@@ -27,10 +27,11 @@ def fetch_underlying_price(ib: IB, symbol: str, exchange: str = "SMART", currenc
     contract = Stock(symbol, exchange, currency)
     ib.qualifyContracts(contract)
     ticker = ib.reqMktData(contract, "", snapshot=True)
-    ib.sleep(2.0)
-    price = ticker.marketPrice()
-    ib.cancelMktData(contract)
-    return price
+    try:
+        ib.sleep(2.0)
+        return ticker.marketPrice()
+    finally:
+        ib.cancelMktData(contract)
 
 
 def fetch_option_market_data(ib: IB, option_contract: Option, timeout: float = 4.0) -> Ticker:
@@ -38,6 +39,8 @@ def fetch_option_market_data(ib: IB, option_contract: Option, timeout: float = 4
     is no live options market-data subscription — caller must fall back to
     calc.implied_vol/calc.bs_greeks in that case."""
     ticker = ib.reqMktData(option_contract, genericTickList="106")
-    ib.sleep(timeout)
-    ib.cancelMktData(option_contract)
-    return ticker
+    try:
+        ib.sleep(timeout)
+        return ticker
+    finally:
+        ib.cancelMktData(option_contract)

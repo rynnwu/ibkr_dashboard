@@ -1,3 +1,4 @@
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -104,6 +105,25 @@ def test_position_to_record_plain_stock(monkeypatch):
     assert record["delta"] == 1.0
     assert record["iv"] is None
     assert record["quantity"] == 10
+
+
+def test_position_to_record_raises_on_nan_underlying_price(monkeypatch):
+    contract = SimpleNamespace(secType="STK", symbol="AAPL")
+    pos = SimpleNamespace(contract=contract, position=10)
+    monkeypatch.setattr(main.ibkr_client, "fetch_underlying_price", lambda ib, symbol, **k: math.nan)
+    with pytest.raises(ValueError):
+        main._position_to_record(ib=None, pos=pos, cfg=_fake_cfg())
+
+
+def test_position_to_record_option_raises_on_nan_underlying_price(monkeypatch):
+    contract = SimpleNamespace(
+        secType="OPT", symbol="TSLA", strike=200.0, right="C",
+        lastTradeDateOrContractMonth="20261016",
+    )
+    pos = SimpleNamespace(contract=contract, position=1)
+    monkeypatch.setattr(main.ibkr_client, "fetch_underlying_price", lambda ib, symbol, **k: math.nan)
+    with pytest.raises(ValueError):
+        main._position_to_record(ib=None, pos=pos, cfg=_fake_cfg())
 
 
 def test_position_to_record_leveraged_etf(monkeypatch):
