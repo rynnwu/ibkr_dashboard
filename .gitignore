@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 .venv/
 backend/icon_cache/
+.claude/
