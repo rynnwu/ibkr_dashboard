@@ -75,9 +75,12 @@ def get_icon_and_color(
 
     logo_bytes = fetch_logo_bytes(symbol, api_key, getter)
     if logo_bytes:
-        color = extract_dominant_color(logo_bytes)
-        icon_path.write_bytes(logo_bytes)
-    else:
+        try:
+            color = extract_dominant_color(logo_bytes)
+            icon_path.write_bytes(logo_bytes)
+        except Exception:
+            logo_bytes = None
+    if not logo_bytes:
         color = hash_color(symbol)
         icon_path.write_bytes(generate_text_fallback_icon(symbol, color))
 

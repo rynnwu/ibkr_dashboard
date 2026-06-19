@@ -102,3 +102,13 @@ def test_get_icon_and_color_falls_back_to_text_icon_when_fetch_fails(tmp_path):
     )
     assert color == icons.hash_color("ZZZZ")
     assert Path(path).exists()
+
+
+def test_get_icon_and_color_handles_malformed_image_gracefully(tmp_path):
+    path, color = icons.get_icon_and_color(
+        "BADI", api_key="key", cache_dir=tmp_path, getter=lambda *a, **k: _FakeResponse(200, b"not-a-valid-png")
+    )
+    assert color == icons.hash_color("BADI")
+    assert Path(path).exists()
+    img = Image.open(Path(path))
+    assert img.format == "PNG"
