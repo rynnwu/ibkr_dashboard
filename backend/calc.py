@@ -4,6 +4,9 @@ No I/O here — everything takes plain numbers/dicts so it can be unit
 tested without a live IB Gateway connection.
 """
 
+import math
+from scipy.stats import norm
+
 
 def stock_notional(quantity: float, price: float) -> float:
     return abs(quantity) * price
@@ -25,10 +28,6 @@ def discount(notional: float, exposure: float) -> float:
     if notional == 0:
         return 0.0
     return 1.0 - exposure / notional
-
-
-import math
-from scipy.stats import norm
 
 
 def _d1_d2(S: float, K: float, T: float, r: float, q: float, sigma: float) -> tuple[float, float]:
@@ -57,9 +56,16 @@ def implied_vol(
     tol: float = 1e-6,
     max_iter: int = 100,
 ) -> float:
+    """Compute implied volatility using bisection method.
+
+    Parameters:
+    lo: volatility search bounds (lower)
+    hi: volatility search bounds (upper)
+    tol: price-difference convergence threshold
+    max_iter: bisection iteration cap
+    """
     mid = (lo + hi) / 2
     for _ in range(max_iter):
-        mid = (lo + hi) / 2
         price = bs_price(S, K, T, r, q, mid, right)
         if abs(price - mark_price) < tol:
             break
@@ -67,10 +73,11 @@ def implied_vol(
             hi = mid
         else:
             lo = mid
+        mid = (lo + hi) / 2
     return mid
 
 
-def bs_greeks(S: float, K: float, T: float, r: float, q: float, sigma: float, right: str) -> dict:
+def bs_greeks(S: float, K: float, T: float, r: float, q: float, sigma: float, right: str) -> dict[str, float]:
     d1, d2 = _d1_d2(S, K, T, r, q, sigma)
     pdf_d1 = norm.pdf(d1)
     if right == "C":
