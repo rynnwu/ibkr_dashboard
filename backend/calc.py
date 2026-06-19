@@ -25,3 +25,71 @@ def discount(notional: float, exposure: float) -> float:
     if notional == 0:
         return 0.0
     return 1.0 - exposure / notional
+
+
+import math
+from scipy.stats import norm
+
+
+def _d1_d2(S: float, K: float, T: float, r: float, q: float, sigma: float) -> tuple[float, float]:
+    d1 = (math.log(S / K) + (r - q + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    return d1, d2
+
+
+def bs_price(S: float, K: float, T: float, r: float, q: float, sigma: float, right: str) -> float:
+    d1, d2 = _d1_d2(S, K, T, r, q, sigma)
+    if right == "C":
+        return S * math.exp(-q * T) * norm.cdf(d1) - K * math.exp(-r * T) * norm.cdf(d2)
+    return K * math.exp(-r * T) * norm.cdf(-d2) - S * math.exp(-q * T) * norm.cdf(-d1)
+
+
+def implied_vol(
+    mark_price: float,
+    S: float,
+    K: float,
+    T: float,
+    r: float,
+    q: float,
+    right: str,
+    lo: float = 1e-4,
+    hi: float = 5.0,
+    tol: float = 1e-6,
+    max_iter: int = 100,
+) -> float:
+    mid = (lo + hi) / 2
+    for _ in range(max_iter):
+        mid = (lo + hi) / 2
+        price = bs_price(S, K, T, r, q, mid, right)
+        if abs(price - mark_price) < tol:
+            break
+        if price > mark_price:
+            hi = mid
+        else:
+            lo = mid
+    return mid
+
+
+def bs_greeks(S: float, K: float, T: float, r: float, q: float, sigma: float, right: str) -> dict:
+    d1, d2 = _d1_d2(S, K, T, r, q, sigma)
+    pdf_d1 = norm.pdf(d1)
+    if right == "C":
+        delta = math.exp(-q * T) * norm.cdf(d1)
+        theta_annual = (
+            -S * math.exp(-q * T) * pdf_d1 * sigma / (2 * math.sqrt(T))
+            - r * K * math.exp(-r * T) * norm.cdf(d2)
+            + q * S * math.exp(-q * T) * norm.cdf(d1)
+        )
+    else:
+        delta = -math.exp(-q * T) * norm.cdf(-d1)
+        theta_annual = (
+            -S * math.exp(-q * T) * pdf_d1 * sigma / (2 * math.sqrt(T))
+            + r * K * math.exp(-r * T) * norm.cdf(-d2)
+            - q * S * math.exp(-q * T) * norm.cdf(-d1)
+        )
+    vega_full = S * math.exp(-q * T) * pdf_d1 * math.sqrt(T)
+    return {
+        "delta": delta,
+        "theta": theta_annual / 365.0,  # per calendar day
+        "vega": vega_full / 100.0,      # per 1 vol point (1%)
+    }
