@@ -113,7 +113,7 @@ def _position_to_record(ib: IB, pos: Position, cfg: config.Config) -> dict:
             vega = ticker.modelGreeks.vega or 0.0
             iv = (ticker.modelGreeks.impliedVol or 0.0) * 100
         else:
-            mark = ticker.marketPrice()
+            mark = ibkr_client.mark_price(ticker)
             if math.isnan(mark):
                 raise ValueError(f"no valid option mark price for {contract.localSymbol}")
             T = _years_to_expiry(contract.lastTradeDateOrContractMonth)

@@ -4,8 +4,20 @@ Requires a running, logged-in IB Gateway (IB API mode) reachable at the
 configured host/port. Never calls any order-placement method.
 """
 import asyncio
+import math
 
 from ib_insync import IB, Stock, Option, Position, Ticker
+
+
+def mark_price(ticker: Ticker) -> float:
+    """Best available mark from a ticker: the live/delayed market price when
+    present, otherwise the previous close. `close` is often available for free
+    even on accounts with no real-time quote subscription (notably options
+    without an OPRA feed), so this keeps the dashboard usable end-of-day."""
+    price = ticker.marketPrice()
+    if not math.isnan(price):
+        return price
+    return ticker.close
 
 
 def connect(host: str, port: int, client_id: int, timeout: float = 10.0) -> IB:
@@ -43,19 +55,23 @@ def fetch_underlying_price(ib: IB, symbol: str, exchange: str = "SMART", currenc
     ticker = ib.reqMktData(contract, "", snapshot=True)
     try:
         ib.sleep(2.0)
-        return ticker.marketPrice()
+        return mark_price(ticker)
     finally:
         ib.cancelMktData(contract)
 
 
 def fetch_option_market_data(ib: IB, option_contract: Option, timeout: float = 4.0) -> Ticker:
-    """Returns the ib_insync Ticker; ticker.modelGreeks may be None if there
-    is no live options market-data subscription — caller must fall back to
-    calc.implied_vol/calc.bs_greeks in that case."""
+    """Returns the ib_insync Ticker via a one-time snapshot.
+
+    A plain snapshot (no genericTickList="106" option-computation tick) avoids
+    the live-OPRA-subscription requirement, so with delayed market data enabled
+    it still yields a mark price for accounts without an options data feed.
+    modelGreeks is therefore typically None here, and the caller falls back to
+    calc.implied_vol/calc.bs_greeks computed from the snapshot mark price."""
     if not option_contract.exchange:
         option_contract.exchange = "SMART"
     ib.qualifyContracts(option_contract)
-    ticker = ib.reqMktData(option_contract, genericTickList="106")
+    ticker = ib.reqMktData(option_contract, "", snapshot=True)
     try:
         ib.sleep(timeout)
         return ticker
