@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 from backend import main
 from backend import config as config_module
@@ -21,12 +22,12 @@ def test_build_portfolio_response_shape():
         {
             "label": "TSLA", "underlying": "TSLA", "type": "STK",
             "notional": 39284.0, "exposure": 39284.0, "discount": 0.0,
-            "delta": 1.0, "iv": None,
+            "delta": 1.0, "iv": None, "quantity": 100,
         },
         {
             "label": "TSLA 200C Oct16", "underlying": "TSLA", "type": "COPT",
             "notional": 39284.0, "exposure": 38117.0, "discount": 0.0297,
-            "delta": 0.970, "iv": 71.8,
+            "delta": 0.970, "iv": 71.8, "quantity": 2,
         },
     ]
     icon_lookup = {"TSLA": ("icon_cache/TSLA.png", "#e8703a")}
@@ -41,6 +42,24 @@ def test_build_portfolio_response_shape():
     assert result["totalNotional"] == 78568.0
     assert "netDelta" in result
     assert result["warnings"] == []
+
+
+def test_build_portfolio_response_greeks_card_accounts_for_quantity_and_short_sign():
+    positions = [
+        {
+            "label": "TSLA 200P short", "underlying": "TSLA", "type": "POPT",
+            "notional": 20000.0, "exposure": 8000.0, "discount": 0.6,
+            "delta": -0.40, "theta": -0.05, "vega": 0.10, "iv": 50.0,
+            "underlying_price": 200.0, "quantity": -2,  # short 2 puts
+        },
+    ]
+    result = main.build_portfolio_response(positions=positions, nlv=100000.0, icon_lookup={}, warnings=[])
+    # quantity(-2) * 100 * delta(-0.40) = +80 -> short put is bullish (positive delta-equivalent)
+    assert result["netDelta"] == pytest.approx(80.0)
+    # quantity(-2) * 100 * theta(-0.05) = +10 -> short option collects theta (positive)
+    assert result["netTheta"] == pytest.approx(10.0)
+    # quantity(-2) * 100 * vega(0.10) = -20 -> short option has negative vega exposure
+    assert result["netVega"] == pytest.approx(-20.0)
 
 
 def _fake_cfg(leveraged_etf_map=None, dividend_yield=None, risk_free_rate=0.0425):
@@ -65,6 +84,7 @@ def test_position_to_record_plain_stock(monkeypatch):
     assert record["discount"] == 0.0
     assert record["delta"] == 1.0
     assert record["iv"] is None
+    assert record["quantity"] == 10
 
 
 def test_position_to_record_leveraged_etf(monkeypatch):
@@ -78,6 +98,7 @@ def test_position_to_record_leveraged_etf(monkeypatch):
     assert record["exposure"] == 4000.0
     assert record["discount"] == 0.0
     assert record["delta"] == 2.0
+    assert record["quantity"] == 100
 
 
 def test_position_to_record_option_uses_model_greeks_when_available(monkeypatch):
@@ -100,6 +121,7 @@ def test_position_to_record_option_uses_model_greeks_when_available(monkeypatch)
     assert record["iv"] == 45.0
     assert record["notional"] == 21000.0  # 1 * 100 * 210.0
     assert record["exposure"] == 21000.0 * 0.6
+    assert record["quantity"] == 1
 
 
 def test_position_to_record_option_falls_back_to_black_scholes_when_no_model_greeks(monkeypatch):
@@ -117,6 +139,7 @@ def test_position_to_record_option_falls_back_to_black_scholes_when_no_model_gre
     assert record["type"] == "COPT"
     assert record["iv"] is not None
     assert 0.0 < record["delta"] < 1.0
+    assert record["quantity"] == 1
 
 
 def test_position_to_record_put_option_type_is_popt(monkeypatch):
@@ -134,6 +157,7 @@ def test_position_to_record_put_option_type_is_popt(monkeypatch):
     record = main._position_to_record(ib=None, pos=pos, cfg=_fake_cfg())
     assert record["type"] == "POPT"
     assert record["delta"] == -0.4
+    assert record["quantity"] == 1
 
 
 def test_years_to_expiry_future_date_is_roughly_expected_fraction():

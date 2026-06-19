@@ -21,9 +21,9 @@ def build_portfolio_response(positions: list[dict], nlv: float, icon_lookup: dic
 
     option_positions = [
         {
-            "delta_shares": p["notional"] * p["delta"] / p["underlying_price"] if p.get("underlying_price") else 0.0,
-            "theta": p.get("theta", 0.0),
-            "vega": p.get("vega", 0.0),
+            "delta_shares": p["quantity"] * 100 * p["delta"] if p.get("delta") is not None else 0.0,
+            "theta": p["quantity"] * 100 * p.get("theta", 0.0),
+            "vega": p["quantity"] * 100 * p.get("vega", 0.0),
         }
         for p in positions
         if p["type"] in ("COPT", "POPT")
@@ -119,6 +119,7 @@ def _position_to_record(ib: IB, pos: Position, cfg: config.Config) -> dict:
             "type": "COPT" if contract.right == "C" else "POPT",
             "notional": notional, "exposure": exposure, "discount": calc.discount(notional, exposure),
             "delta": delta, "theta": theta, "vega": vega, "iv": iv, "underlying_price": underlying_price,
+            "quantity": pos.position,
         }
 
     mapping = cfg.leveraged_etf_map.get(contract.symbol)
@@ -136,6 +137,7 @@ def _position_to_record(ib: IB, pos: Position, cfg: config.Config) -> dict:
         "underlying": underlying, "type": "STK",
         "notional": notional, "exposure": notional, "discount": 0.0,
         "delta": delta, "theta": 0.0, "vega": 0.0, "iv": None, "underlying_price": price,
+        "quantity": pos.position,
     }
 
 
