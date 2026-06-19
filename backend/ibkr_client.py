@@ -3,7 +3,7 @@
 Requires a running, logged-in IB Gateway (IB API mode) reachable at the
 configured host/port. Never calls any order-placement method.
 """
-from ib_insync import IB, Stock, Option
+from ib_insync import IB, Stock, Option, Position, Ticker
 
 
 def connect(host: str, port: int, client_id: int, timeout: float = 10.0) -> IB:
@@ -12,7 +12,7 @@ def connect(host: str, port: int, client_id: int, timeout: float = 10.0) -> IB:
     return ib
 
 
-def fetch_positions(ib: IB) -> list:
+def fetch_positions(ib: IB) -> list[Position]:
     return ib.positions()
 
 
@@ -33,7 +33,7 @@ def fetch_underlying_price(ib: IB, symbol: str, exchange: str = "SMART", currenc
     return price
 
 
-def fetch_option_market_data(ib: IB, option_contract: Option, timeout: float = 4.0):
+def fetch_option_market_data(ib: IB, option_contract: Option, timeout: float = 4.0) -> Ticker:
     """Returns the ib_insync Ticker; ticker.modelGreeks may be None if there
     is no live options market-data subscription — caller must fall back to
     calc.implied_vol/calc.bs_greeks in that case."""
