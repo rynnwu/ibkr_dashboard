@@ -40,22 +40,22 @@ export default function DonutChart({ data, total, title, subtitle, nlv, colorFor
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
       <div style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 10, color: "#5a7a9a", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 4 }}>{title}</div>
       <svg width={320} height={320} style={{ overflow: "visible" }}>
-        {slices.map((s) => {
+        {slices.map((s, i) => {
           const isH = hoveredUnd === s.und, isO = hoveredUnd && !isH;
           const R = isH ? outerR + 6 : outerR;
           return (
-            <path key={s.und} d={arc(s.sa, s.ea, innerR, R)}
+            <path key={`${s.und}-${i}`} d={arc(s.sa, s.ea, innerR, R)}
               fill={colorFor(s.und)} opacity={isO ? 0.3 : 1}
               stroke="#070b14" strokeWidth={1.5} style={{ cursor: "pointer", transition: "opacity 0.15s" }}
               onMouseEnter={() => onHover(s.und)} onMouseLeave={() => onHover(null)} />
           );
         })}
-        {slices.map((s) => {
+        {slices.map((s, i) => {
           if (s.frac < 0.012) return null;
           const [x1, y1] = pol(s.mid, outerR + 4), [x2, y2] = pol(s.mid, outerR + 14), [tx, ty] = pol(s.mid, outerR + 22);
           const anc = Math.cos(s.mid) > 0.1 ? "start" : Math.cos(s.mid) < -0.1 ? "end" : "middle";
           return (
-            <g key={"l" + s.und}>
+            <g key={"l-" + s.und + "-" + i}>
               <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={colorFor(s.und)} strokeWidth={0.8} opacity={0.7} />
               <text x={tx} y={ty} textAnchor={anc} dominantBaseline="middle" fill={colorFor(s.und)} fontSize={9.5} fontFamily="'JetBrains Mono',monospace" fontWeight="600">{s.und}</text>
             </g>
