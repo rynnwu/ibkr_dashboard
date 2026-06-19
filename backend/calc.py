@@ -112,6 +112,8 @@ def aggregate_by_underlying(positions: list[dict]) -> list[dict]:
 
 
 def portfolio_leverage(total_notional: float, total_exposure: float, nlv: float) -> dict[str, float]:
+    if nlv == 0:
+        return {"notional_leverage": 0.0, "exposure_leverage": 0.0}
     return {
         "notional_leverage": total_notional / nlv,
         "exposure_leverage": total_exposure / nlv,

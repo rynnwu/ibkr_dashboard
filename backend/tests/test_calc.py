@@ -87,6 +87,11 @@ def test_portfolio_leverage_ratios():
     assert result["exposure_leverage"] == pytest.approx(2.0)
 
 
+def test_portfolio_leverage_returns_zero_when_nlv_is_zero():
+    result = calc.portfolio_leverage(total_notional=100.0, total_exposure=50.0, nlv=0.0)
+    assert result == {"notional_leverage": 0.0, "exposure_leverage": 0.0}
+
+
 def test_greeks_card_sums_option_positions_only():
     option_positions = [
         {"delta_shares": 100.0, "theta": 5.0, "vega": -2.0},
