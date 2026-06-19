@@ -40,3 +40,43 @@ def generate_text_fallback_icon(symbol: str, color: str) -> bytes:
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
+
+
+def fetch_logo_bytes(symbol: str, api_key: str, getter=requests.get) -> bytes | None:
+    if not api_key:
+        return None
+    try:
+        resp = getter(LOGO_URL_TEMPLATE.format(symbol=symbol), params={"api_token": api_key}, timeout=5)
+    except requests.RequestException:
+        return None
+    if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image"):
+        return resp.content
+    return None
+
+
+def get_icon_and_color(
+    symbol: str,
+    api_key: str,
+    cache_dir: Path = CACHE_DIR,
+    getter=requests.get,
+) -> tuple[str, str]:
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    icon_path = cache_dir / f"{symbol}.png"
+    colors_path = cache_dir / "colors.json"
+    colors = json.loads(colors_path.read_text()) if colors_path.exists() else {}
+
+    if icon_path.exists() and symbol in colors:
+        return str(icon_path), colors[symbol]
+
+    logo_bytes = fetch_logo_bytes(symbol, api_key, getter)
+    if logo_bytes:
+        color = extract_dominant_color(logo_bytes)
+        icon_path.write_bytes(logo_bytes)
+    else:
+        color = hash_color(symbol)
+        icon_path.write_bytes(generate_text_fallback_icon(symbol, color))
+
+    colors[symbol] = color
+    colors_path.write_text(json.dumps(colors))
+    return str(icon_path), color
