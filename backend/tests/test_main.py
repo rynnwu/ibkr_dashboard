@@ -181,6 +181,19 @@ def test_position_to_record_option_falls_back_to_black_scholes_when_no_model_gre
     assert record["quantity"] == 1
 
 
+def test_position_to_record_raises_on_nan_option_mark_price(monkeypatch):
+    contract = SimpleNamespace(
+        secType="OPT", symbol="TSLA", strike=200.0, right="C",
+        lastTradeDateOrContractMonth="20261016", localSymbol="TSLA  261016C00200000",
+    )
+    pos = SimpleNamespace(contract=contract, position=1)
+    fake_ticker = SimpleNamespace(modelGreeks=None, marketPrice=lambda: math.nan)
+    monkeypatch.setattr(main.ibkr_client, "fetch_underlying_price", lambda ib, symbol, **k: 210.0)
+    monkeypatch.setattr(main.ibkr_client, "fetch_option_market_data", lambda ib, contract, **k: fake_ticker)
+    with pytest.raises(ValueError):
+        main._position_to_record(ib=None, pos=pos, cfg=_fake_cfg())
+
+
 def test_position_to_record_put_option_type_is_popt(monkeypatch):
     contract = SimpleNamespace(
         secType="OPT", symbol="TSLA", strike=200.0, right="P",

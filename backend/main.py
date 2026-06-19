@@ -113,10 +113,13 @@ def _position_to_record(ib: IB, pos: Position, cfg: config.Config) -> dict:
             vega = ticker.modelGreeks.vega or 0.0
             iv = (ticker.modelGreeks.impliedVol or 0.0) * 100
         else:
+            mark = ticker.marketPrice()
+            if math.isnan(mark):
+                raise ValueError(f"no valid option mark price for {contract.localSymbol}")
             T = _years_to_expiry(contract.lastTradeDateOrContractMonth)
             q = cfg.dividend_yield_for(contract.symbol)
             right = "C" if contract.right == "C" else "P"
-            sigma = calc.implied_vol(ticker.marketPrice(), underlying_price, contract.strike, T, cfg.risk_free_rate, q, right)
+            sigma = calc.implied_vol(mark, underlying_price, contract.strike, T, cfg.risk_free_rate, q, right)
             greeks = calc.bs_greeks(underlying_price, contract.strike, T, cfg.risk_free_rate, q, sigma, right)
             delta, theta, vega, iv = greeks["delta"], greeks["theta"], greeks["vega"], sigma * 100
         exposure = calc.option_exposure(notional, delta)
