@@ -1,5 +1,4 @@
 # git
-- never commit personal information.
 - commit message in Tradition Chinese.
 
 # add, modify anything
