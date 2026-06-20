@@ -1,9 +1,49 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import DonutChart from "./components/DonutChart";
 import { fetchPortfolio } from "./api";
-import type { PortfolioResponse } from "./types";
+import type { PortfolioResponse, UnderlyingRow, PositionRow } from "./types";
 
 const fmt = (n: number, d = 0) => n.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+
+// Font scaling: the smallest size used in the design was 16 → 10pt.
+// Every size is scaled by the same ratio so proportions are preserved.
+const FONT_SCALE = 10 / 16;
+const fs = (px: number) => `${+(px * FONT_SCALE).toFixed(3)}pt`;
+
+type SortDir = "asc" | "desc";
+type UndKey = "symbol" | "notional" | "notPct" | "exposure" | "expPct" | "discount";
+type PosKey = "label" | "type" | "notional" | "exposure" | "discount" | "delta" | "iv";
+
+function nextSort<K extends string>(cur: { key: K; dir: SortDir }, key: K): { key: K; dir: SortDir } {
+  if (cur.key === key) return { key, dir: cur.dir === "asc" ? "desc" : "asc" };
+  return { key, dir: "desc" };
+}
+
+const cmp = (a: string | number, b: string | number, dir: SortDir) => {
+  const r = typeof a === "string" && typeof b === "string" ? a.localeCompare(b) : (a as number) - (b as number);
+  return dir === "asc" ? r : -r;
+};
+
+const undVal = (u: UnderlyingRow, key: UndKey): string | number => {
+  switch (key) {
+    case "symbol": return u.symbol;
+    case "notional": case "notPct": return u.notional;
+    case "exposure": case "expPct": return u.exposure;
+    case "discount": return u.notional !== 0 ? 1 - u.exposure / u.notional : 0;
+  }
+};
+
+const posVal = (p: PositionRow, key: PosKey): string | number => {
+  switch (key) {
+    case "label": return p.label;
+    case "type": return p.type;
+    case "notional": return p.notional;
+    case "exposure": return p.exposure;
+    case "discount": return p.discount;
+    case "delta": return p.delta ?? -Infinity;
+    case "iv": return p.iv ?? -Infinity;
+  }
+};
 
 export default function App() {
   const [data, setData] = useState<PortfolioResponse | null>(null);
@@ -11,6 +51,8 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [view, setView] = useState<"byUnd" | "byPos">("byUnd");
   const [hoveredUnd, setHoveredUnd] = useState<string | null>(null);
+  const [undSort, setUndSort] = useState<{ key: UndKey; dir: SortDir }>({ key: "notional", dir: "desc" });
+  const [posSort, setPosSort] = useState<{ key: PosKey; dir: SortDir }>({ key: "notional", dir: "desc" });
 
   // A portfolio fetch takes ~2 min and opens a gateway connection; guard
   // against overlapping loads (React StrictMode double-invokes this effect,
@@ -33,7 +75,7 @@ export default function App() {
   // eslint-disable-next-line react-hooks/set-state-in-effect -- async fetch-on-mount; setState calls happen inside promise callbacks, not synchronously in the effect body
   useEffect(() => { load(); }, [load]);
 
-  const bg = "#070b14", card = "#0c1422", border = "#1a2d45", text = "#c8ddf0", muted = "#4a7a9a", accent = "#2a6fb8", mono = "'JetBrains Mono','Fira Code',monospace";
+  const bg = "#f5f7fa", card = "#ffffff", border = "#d8e0ea", text = "#1a2a3a", muted = "#5a7a9a", accent = "#2a6fb8", mono = "'JetBrains Mono','Fira Code',monospace";
 
   const colorFor = (und: string) => data?.underlyings.find((u) => u.symbol === und)?.color ?? "#556";
 
@@ -55,18 +97,44 @@ export default function App() {
   const posN = data.positions.map((p) => ({ und: p.underlying, label: p.label, val: p.notional }));
   const posE = data.positions.map((p) => ({ und: p.underlying, label: p.label, val: p.exposure }));
 
+  // Legend under the pie: sorted by notional share (percentage) descending.
+  const legendUnd = [...data.underlyings].sort((a, b) => b.notional - a.notional);
+
+  const sortedUnd = [...data.underlyings].sort((a, b) => cmp(undVal(a, undSort.key), undVal(b, undSort.key), undSort.dir));
+  const sortedPos = [...data.positions].sort((a, b) => cmp(posVal(a, posSort.key), posVal(b, posSort.key), posSort.dir));
+
+  const undCols: { label: string; key: UndKey; align: "left" | "right" }[] = [
+    { label: "標的", key: "symbol", align: "left" },
+    { label: "Notional", key: "notional", align: "right" },
+    { label: "Not%", key: "notPct", align: "right" },
+    { label: "Exposure", key: "exposure", align: "right" },
+    { label: "Exp%", key: "expPct", align: "right" },
+    { label: "Discount", key: "discount", align: "right" },
+  ];
+  const posCols: { label: string; key: PosKey; align: "left" | "right" }[] = [
+    { label: "倉位", key: "label", align: "left" },
+    { label: "類型", key: "type", align: "left" },
+    { label: "Notional", key: "notional", align: "right" },
+    { label: "Exposure", key: "exposure", align: "right" },
+    { label: "Discount", key: "discount", align: "right" },
+    { label: "Δ", key: "delta", align: "right" },
+    { label: "IV", key: "iv", align: "right" },
+  ];
+
+  const arrow = (active: boolean, dir: SortDir) => (active ? (dir === "asc" ? " ▲" : " ▼") : "");
+
   return (
-    <div style={{ background: bg, minHeight: "100vh", color: text, fontFamily: mono, fontSize: 12, paddingBottom: 40 }}>
+    <div style={{ background: bg, minHeight: "100vh", color: text, fontFamily: mono, fontSize: fs(21), paddingBottom: 40 }}>
       <div style={{ background: card, borderBottom: `1px solid ${border}`, padding: "14px 24px", display: "flex", flexWrap: "wrap", gap: 16, alignItems: "center", justifyContent: "space-between" }}>
         <div>
-          <div style={{ fontSize: 10, color: muted, letterSpacing: "0.12em", textTransform: "uppercase" }}>Portfolio Risk Dashboard</div>
-          <div style={{ fontSize: 15, color: "#e0eeff", fontWeight: 700, marginTop: 2 }}>Notional &amp; Delta Exposure</div>
+          <div style={{ fontSize: fs(18), color: muted, letterSpacing: "0.12em", textTransform: "uppercase" }}>Portfolio Risk Dashboard</div>
+          <div style={{ fontSize: fs(27), color: "#0d2438", fontWeight: 700, marginTop: 2 }}>Notional &amp; Delta Exposure</div>
         </div>
         <div style={{ display: "flex", gap: 20, flexWrap: "wrap", alignItems: "center" }}>
           {[["NLV", `$${fmt(data.nlv)}`], ["Notional", `$${fmt(data.totalNotional)}`], ["Notl Lev", `${data.notionalLeverage.toFixed(2)}×`], ["Exposure", `$${fmt(data.totalExposure)}`], ["Exp Lev", `${data.exposureLeverage.toFixed(2)}×`]].map(([l, v]) => (
             <div key={l} style={{ textAlign: "right" }}>
-              <div style={{ fontSize: 9, color: muted, letterSpacing: "0.1em" }}>{l}</div>
-              <div style={{ fontSize: 13, color: "#e0eeff", fontWeight: 700 }}>{v}</div>
+              <div style={{ fontSize: fs(16), color: muted, letterSpacing: "0.1em" }}>{l}</div>
+              <div style={{ fontSize: fs(23), color: "#0d2438", fontWeight: 700 }}>{v}</div>
             </div>
           ))}
           <button onClick={load} style={{ background: accent, color: "#fff", border: "none", padding: "6px 14px", borderRadius: 4, cursor: "pointer", fontFamily: mono }}>重新整理</button>
@@ -75,7 +143,7 @@ export default function App() {
 
       <div style={{ display: "flex", justifyContent: "center", padding: "14px 0 6px", gap: 8 }}>
         {([["byUnd", "依標的"], ["byPos", "依倉位"]] as const).map(([v, l]) => (
-          <button key={v} onClick={() => setView(v)} style={{ background: view === v ? accent : "transparent", border: `1px solid ${view === v ? accent : border}`, color: view === v ? "#fff" : muted, fontFamily: mono, fontSize: 11, letterSpacing: "0.08em", padding: "5px 16px", borderRadius: 3, cursor: "pointer" }}>{l}</button>
+          <button key={v} onClick={() => setView(v)} style={{ background: view === v ? accent : "transparent", border: `1px solid ${view === v ? accent : border}`, color: view === v ? "#fff" : muted, fontFamily: mono, fontSize: fs(20), letterSpacing: "0.08em", padding: "5px 16px", borderRadius: 3, cursor: "pointer" }}>{l}</button>
         ))}
       </div>
 
@@ -86,50 +154,53 @@ export default function App() {
 
       <div style={{ display: "flex", justifyContent: "center", padding: "14px 24px 6px" }}>
         <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 4, padding: "10px 32px", display: "flex", gap: 40 }}>
-          {[["Net Δ (share-eq)", fmt(data.netDelta), "#4a9eff"], ["Net Θ/day", `${data.netTheta >= 0 ? "+" : ""}$${fmt(data.netTheta, 2)}`, "#4fc3a1"], ["Net Vega /1%vol", `${data.netVega >= 0 ? "+" : "-"}$${fmt(Math.abs(data.netVega), 2)}`, "#e8703a"]].map(([l, v, c]) => (
+          {[["Net Δ (share-eq)", fmt(data.netDelta), "#2f7fd0"], ["Net Θ/day", `${data.netTheta >= 0 ? "+" : ""}$${fmt(data.netTheta, 2)}`, "#1f9e7a"], ["Net Vega /1%vol", `${data.netVega >= 0 ? "+" : "-"}$${fmt(Math.abs(data.netVega), 2)}`, "#d2601f"]].map(([l, v, c]) => (
             <div key={l} style={{ textAlign: "center" }}>
-              <div style={{ fontSize: 9, color: muted, letterSpacing: "0.1em", marginBottom: 4 }}>{l}</div>
-              <div style={{ fontSize: 15, color: c, fontWeight: 700 }}>{v}</div>
+              <div style={{ fontSize: fs(16), color: muted, letterSpacing: "0.1em", marginBottom: 4 }}>{l}</div>
+              <div style={{ fontSize: fs(27), color: c, fontWeight: 700 }}>{v}</div>
             </div>
           ))}
         </div>
       </div>
 
       <div style={{ display: "flex", flexWrap: "wrap", gap: 5, justifyContent: "center", padding: "6px 24px" }}>
-        {data.underlyings.map((u) => (
+        {legendUnd.map((u) => (
           <div key={u.symbol} onMouseEnter={() => setHoveredUnd(u.symbol)} onMouseLeave={() => setHoveredUnd(null)}
-            style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer", background: hoveredUnd === u.symbol ? "#1a2d45" : "transparent", borderRadius: 3, padding: "2px 8px" }}>
+            style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer", background: hoveredUnd === u.symbol ? "#e8eef6" : "transparent", borderRadius: 3, padding: "2px 8px" }}>
             {u.iconUrl && <img src={u.iconUrl} alt={u.symbol} width={14} height={14} style={{ borderRadius: 2 }} />}
-            <span style={{ color: muted, fontSize: 9 }}>{u.symbol}</span>
-            <span style={{ color: "#607888", fontSize: 9 }}>{data.totalNotional !== 0 ? ((u.notional / data.totalNotional) * 100).toFixed(1) + "%N" : "—"}</span>
-            <span style={{ color: "#506070", fontSize: 9 }}>/{data.totalExposure !== 0 ? ((u.exposure / data.totalExposure) * 100).toFixed(1) + "%E" : "—"}</span>
+            <span style={{ color: muted, fontSize: fs(16) }}>{u.symbol}</span>
+            <span style={{ color: "#607888", fontSize: fs(16) }}>{data.totalNotional !== 0 ? ((u.notional / data.totalNotional) * 100).toFixed(1) + "%N" : "—"}</span>
+            <span style={{ color: "#506070", fontSize: fs(16) }}>/{data.totalExposure !== 0 ? ((u.exposure / data.totalExposure) * 100).toFixed(1) + "%E" : "—"}</span>
           </div>
         ))}
       </div>
 
       <div style={{ padding: "10px 24px 0" }}>
-        <div style={{ fontSize: 9, color: muted, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 6 }}>標的明細 Underlying Breakdown</div>
+        <div style={{ fontSize: fs(16), color: muted, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 6 }}>標的明細 Underlying Breakdown</div>
         <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: fs(20) }}>
             <thead>
               <tr style={{ borderBottom: `1px solid ${border}`, color: muted }}>
-                {["標的", "Notional", "Not%", "Exposure", "Exp%", "Discount"].map((h, i) => (
-                  <th key={h} style={{ padding: "4px 10px", textAlign: i === 0 ? "left" : "right", fontWeight: 500, fontSize: 9, whiteSpace: "nowrap" }}>{h}</th>
+                {undCols.map((c) => (
+                  <th key={c.key} onClick={() => setUndSort(nextSort(undSort, c.key))}
+                    style={{ padding: "4px 10px", textAlign: c.align, fontWeight: 500, fontSize: fs(20), whiteSpace: "nowrap", cursor: "pointer", userSelect: "none", color: undSort.key === c.key ? accent : muted }}>
+                    {c.label}{arrow(undSort.key === c.key, undSort.dir)}
+                  </th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {data.underlyings.map((u) => {
+              {sortedUnd.map((u) => {
                 const disc = 1 - u.exposure / u.notional;
                 return (
-                  <tr key={u.symbol} onMouseEnter={() => setHoveredUnd(u.symbol)} onMouseLeave={() => setHoveredUnd(null)} style={{ borderBottom: "1px solid #111b2a" }}>
+                  <tr key={u.symbol} onMouseEnter={() => setHoveredUnd(u.symbol)} onMouseLeave={() => setHoveredUnd(null)} style={{ borderBottom: "1px solid #eef2f7" }}>
                     <td style={{ padding: "5px 10px", display: "flex", alignItems: "center", gap: 6 }}>
                       {u.iconUrl && <img src={u.iconUrl} alt={u.symbol} width={14} height={14} style={{ borderRadius: 2 }} />}
-                      <span style={{ color: "#c0d8f0", fontWeight: 600 }}>{u.symbol}</span>
+                      <span style={{ color: "#1a2a3a", fontWeight: 600 }}>{u.symbol}</span>
                     </td>
-                    <td style={{ padding: "5px 10px", textAlign: "right", color: "#a0c0e0" }}>${fmt(u.notional)}</td>
+                    <td style={{ padding: "5px 10px", textAlign: "right", color: "#3a5a7a" }}>${fmt(u.notional)}</td>
                     <td style={{ padding: "5px 10px", textAlign: "right", color: muted }}>{data.totalNotional !== 0 ? ((u.notional / data.totalNotional) * 100).toFixed(1) + "%" : "—"}</td>
-                    <td style={{ padding: "5px 10px", textAlign: "right", color: "#a0c0e0" }}>${fmt(u.exposure)}</td>
+                    <td style={{ padding: "5px 10px", textAlign: "right", color: "#3a5a7a" }}>${fmt(u.exposure)}</td>
                     <td style={{ padding: "5px 10px", textAlign: "right", color: muted }}>{data.totalExposure !== 0 ? ((u.exposure / data.totalExposure) * 100).toFixed(1) + "%" : "—"}</td>
                     <td style={{ padding: "5px 10px", textAlign: "right" }}>{u.notional !== 0 ? (disc * 100).toFixed(1) + "%" : "—"}</td>
                   </tr>
@@ -141,23 +212,26 @@ export default function App() {
       </div>
 
       <div style={{ padding: "14px 24px 0" }}>
-        <div style={{ fontSize: 9, color: muted, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 6 }}>倉位明細 Position Details</div>
+        <div style={{ fontSize: fs(16), color: muted, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 6 }}>倉位明細 Position Details</div>
         <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10.5, minWidth: 680 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: fs(19), minWidth: 680 }}>
             <thead>
               <tr style={{ borderBottom: `1px solid ${border}`, color: muted }}>
-                {["倉位", "類型", "Notional", "Exposure", "Discount", "Δ", "IV"].map((h, i) => (
-                  <th key={h} style={{ padding: "4px 10px", textAlign: i <= 1 ? "left" : "right", fontWeight: 500, fontSize: 9, whiteSpace: "nowrap" }}>{h}</th>
+                {posCols.map((c) => (
+                  <th key={c.key} onClick={() => setPosSort(nextSort(posSort, c.key))}
+                    style={{ padding: "4px 10px", textAlign: c.align, fontWeight: 500, fontSize: fs(19), whiteSpace: "nowrap", cursor: "pointer", userSelect: "none", color: posSort.key === c.key ? accent : muted }}>
+                    {c.label}{arrow(posSort.key === c.key, posSort.dir)}
+                  </th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {data.positions.map((p, i) => (
-                <tr key={i} onMouseEnter={() => setHoveredUnd(p.underlying)} onMouseLeave={() => setHoveredUnd(null)} style={{ borderBottom: "1px solid #0e1a28" }}>
-                  <td style={{ padding: "4px 10px", color: "#b0ccdf" }}>{p.label}</td>
-                  <td style={{ padding: "4px 10px", fontSize: 9 }}>{p.type}</td>
-                  <td style={{ padding: "4px 10px", textAlign: "right", color: "#90b0d0" }}>${fmt(p.notional)}</td>
-                  <td style={{ padding: "4px 10px", textAlign: "right", color: "#90b0d0" }}>${fmt(p.exposure)}</td>
+              {sortedPos.map((p, i) => (
+                <tr key={`${p.underlying}-${p.label}-${i}`} onMouseEnter={() => setHoveredUnd(p.underlying)} onMouseLeave={() => setHoveredUnd(null)} style={{ borderBottom: "1px solid #eef2f7" }}>
+                  <td style={{ padding: "4px 10px", color: "#2a4a6a" }}>{p.label}</td>
+                  <td style={{ padding: "4px 10px", fontSize: fs(19) }}>{p.type}</td>
+                  <td style={{ padding: "4px 10px", textAlign: "right", color: "#3a5a7a" }}>${fmt(p.notional)}</td>
+                  <td style={{ padding: "4px 10px", textAlign: "right", color: "#3a5a7a" }}>${fmt(p.exposure)}</td>
                   <td style={{ padding: "4px 10px", textAlign: "right" }}>{(p.discount * 100).toFixed(1)}%</td>
                   <td style={{ padding: "4px 10px", textAlign: "right" }}>{p.delta !== null ? (p.delta > 0 ? "+" : "") + p.delta.toFixed(3) : "—"}</td>
                   <td style={{ padding: "4px 10px", textAlign: "right", color: muted }}>{p.iv !== null ? p.iv.toFixed(1) + "%" : "—"}</td>
@@ -169,7 +243,7 @@ export default function App() {
       </div>
 
       {data.warnings.length > 0 && (
-        <div style={{ padding: "14px 24px 0", color: "#e8a03a", fontSize: 10 }}>
+        <div style={{ padding: "14px 24px 0", color: "#b8730a", fontSize: fs(18) }}>
           {data.warnings.map((w, i) => <div key={i}>⚠ {w}</div>)}
         </div>
       )}
