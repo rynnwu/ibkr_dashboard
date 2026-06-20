@@ -8,7 +8,7 @@
 # unrelated python/node/vite processes:
 #
 #   ibkr_piechart_backend    -> uvicorn serving backend.main:app  (port 8000)
-#   ibkr_piechart_frontend   -> vite dev server                   (port 5173)
+#   ibkr_piechart_frontend   -> vite dev server                   (port 5174)
 #
 # Naming mechanics differ by runtime: the frontend (node) takes its name from
 # `exec -a` (argv[0]); the backend cannot, because macOS framework Python
@@ -25,7 +25,7 @@ cd "$ROOT"
 BACKEND_NAME="ibkr_piechart_backend"
 FRONTEND_NAME="ibkr_piechart_frontend"
 BACKEND_PORT=8000
-FRONTEND_PORT=5173
+FRONTEND_PORT=5174
 LOG_DIR="${ROOT}/logs"
 BACKEND_LOG="${LOG_DIR}/${BACKEND_NAME}.log"
 FRONTEND_LOG="${LOG_DIR}/${FRONTEND_NAME}.log"

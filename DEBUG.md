@@ -14,8 +14,8 @@ check the backend log + ports before touching code.
 ## 1. First five commands (triage)
 
 ```bash
-# 1. Is anything actually listening? backend=8000, frontend=5173, gateway=4001
-lsof -nP -iTCP -sTCP:LISTEN | grep -E ':(8000|5173|4001)'
+# 1. Is anything actually listening? backend=8000, frontend=5174, gateway=4001
+lsof -nP -iTCP -sTCP:LISTEN | grep -E ':(8000|5174|4001)'
 
 # 2. Are our processes alive?
 ps aux | grep -E 'ibkr_piechart|uvicorn|vite' | grep -v grep
@@ -81,7 +81,7 @@ no personal info).
 ## 2. Layer map (where a failure lives)
 
 ```
-Browser ──/api proxy──> Vite :5173 ──> FastAPI :8000 ──ib_insync──> IB Gateway :4001 ──> IBKR
+Browser ──/api proxy──> Vite :5174 ──> FastAPI :8000 ──ib_insync──> IB Gateway :4001 ──> IBKR
    │            │                          │                            │
  UI error   proxy cfg                 backend log                  gateway login /
  state    (vite.config.ts)        (/tmp/...backend.log)            API settings
