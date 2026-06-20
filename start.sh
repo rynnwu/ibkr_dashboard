@@ -22,6 +22,9 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
+# Always stop any existing instance first for a clean restart.
+"$ROOT/stop.sh"
+
 BACKEND_NAME="ibkr_piechart_backend"
 FRONTEND_NAME="ibkr_piechart_frontend"
 BACKEND_PORT=8000
