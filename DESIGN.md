@@ -192,7 +192,8 @@ These were all discovered running against a live gateway; the fixes live in
 - IB Gateway must be running and logged in first (IB API mode, port 4001),
   or the dashboard loads but shows a connection error on refresh.
 - Backend → `http://127.0.0.1:8000`, frontend → `http://localhost:5173`.
-- Logs: `/tmp/ibkr_piechart_backend.log`, `/tmp/ibkr_piechart_frontend.log`.
+- Logs: `logs/ibkr_piechart_backend.log`, `logs/ibkr_piechart_frontend.log`
+  (gitignored; written fresh on every `start.sh`).
 
 ### Process naming (why it's done the odd way)
 

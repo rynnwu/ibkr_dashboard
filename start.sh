@@ -26,9 +26,12 @@ BACKEND_NAME="ibkr_piechart_backend"
 FRONTEND_NAME="ibkr_piechart_frontend"
 BACKEND_PORT=8000
 FRONTEND_PORT=5173
-BACKEND_LOG="/tmp/${BACKEND_NAME}.log"
-FRONTEND_LOG="/tmp/${FRONTEND_NAME}.log"
+LOG_DIR="${ROOT}/logs"
+BACKEND_LOG="${LOG_DIR}/${BACKEND_NAME}.log"
+FRONTEND_LOG="${LOG_DIR}/${FRONTEND_NAME}.log"
 URL="http://localhost:${FRONTEND_PORT}"
+
+mkdir -p "$LOG_DIR"
 
 # --- IB Gateway reachability hint (non-fatal) ---------------------------------
 if ! nc -z 127.0.0.1 4001 2>/dev/null; then

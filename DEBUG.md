@@ -21,10 +21,10 @@ lsof -nP -iTCP -sTCP:LISTEN | grep -E ':(8000|5173|4001)'
 ps aux | grep -E 'ibkr_piechart|uvicorn|vite' | grep -v grep
 
 # 3. Backend log (the real story is almost always here)
-tail -60 /tmp/ibkr_piechart_backend.log
+tail -60 logs/ibkr_piechart_backend.log
 
 # 4. Frontend log
-tail -20 /tmp/ibkr_piechart_frontend.log
+tail -20 logs/ibkr_piechart_frontend.log
 
 # 5. Hit the API directly, bypassing the browser/proxy (a request takes ~10s)
 curl -s -w "\nHTTP %{http_code}, %{time_total}s\n" http://127.0.0.1:8000/api/portfolio | head -c 400
@@ -57,8 +57,8 @@ lsof -nP -iTCP:4001 | grep 127.0.0.1
 #    -> only the JavaAppli LISTEN line / all CLOSED = no active request
 
 # 3. Is the backend still writing? Compare mtime to now; reqIds should climb.
-stat -f "%Sm  %N" -t "%H:%M:%S" /tmp/ibkr_piechart_backend.log; date "+%H:%M:%S  (now)"
-tail -5 /tmp/ibkr_piechart_backend.log   # reqId N increasing = progressing
+stat -f "%Sm  %N" -t "%H:%M:%S" logs/ibkr_piechart_backend.log; date "+%H:%M:%S  (now)"
+tail -5 logs/ibkr_piechart_backend.log   # reqId N increasing = progressing
 ```
 
 **Alive** = process up + ESTABLISHED socket to 4001 + log mtime within seconds +
@@ -71,19 +71,12 @@ noise (DESIGN G4), not a stall.
 > refresh is ~10s. If it's now consistently minutes, that's a regression worth
 > investigating — not the old "slow by design" behavior.
 
-## 1c. Capturing logs for a report
+## 1c. Where logs live
 
-Live logs are at `/tmp/ibkr_piechart_{backend,frontend}.log` (overwritten each
-`start.sh`). To snapshot them for later analysis:
-
-```bash
-mkdir -p logs && ts=$(date +%Y%m%d_%H%M%S)
-cp /tmp/ibkr_piechart_backend.log  logs/backend_${ts}.log
-cp /tmp/ibkr_piechart_frontend.log logs/frontend_${ts}.log
-```
-
-`logs/` is **gitignored** — backend logs contain account figures (NLV,
-positions); never commit them (CLAUDE.md: no personal info).
+Live logs are at `logs/ibkr_piechart_{backend,frontend}.log`, written by
+`start.sh` and overwritten on each run. `logs/` is **gitignored** — backend
+logs contain account figures (NLV, positions); never commit them (CLAUDE.md:
+no personal info).
 
 ## 2. Layer map (where a failure lives)
 
