@@ -24,6 +24,42 @@ const cmp = (a: string | number, b: string | number, dir: SortDir) => {
   return dir === "asc" ? r : -r;
 };
 
+// Some icon-derived colors are near-black/desaturated (picked for a dark
+// theme's backdrop); on this light theme they read as muddy. Lift lightness
+// and saturation into a range that stays legible on a white background
+// without disturbing the hue (so the brand-color identity is preserved).
+const hexToHsl = (hex: string): [number, number, number] => {
+  const r = parseInt(hex.slice(1, 3), 16) / 255, g = parseInt(hex.slice(3, 5), 16) / 255, b = parseInt(hex.slice(5, 7), 16) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), l = (max + min) / 2, d = max - min;
+  let h = 0, s = 0;
+  if (d !== 0) {
+    s = d / (1 - Math.abs(2 * l - 1));
+    if (max === r) h = ((g - b) / d) % 6;
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h *= 60;
+    if (h < 0) h += 360;
+  }
+  return [h, s * 100, l * 100];
+};
+const hslToHex = (h: number, s: number, l: number): string => {
+  s /= 100; l /= 100;
+  const c = (1 - Math.abs(2 * l - 1)) * s, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = l - c / 2;
+  let r = 0, g = 0, b = 0;
+  if (h < 60) [r, g, b] = [c, x, 0];
+  else if (h < 120) [r, g, b] = [x, c, 0];
+  else if (h < 180) [r, g, b] = [0, c, x];
+  else if (h < 240) [r, g, b] = [0, x, c];
+  else if (h < 300) [r, g, b] = [x, 0, c];
+  else [r, g, b] = [c, 0, x];
+  const toHex = (v: number) => Math.round((v + m) * 255).toString(16).padStart(2, "0");
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+};
+const lightenForLightTheme = (hex: string): string => {
+  const [h, s, l] = hexToHsl(hex);
+  return hslToHex(h, Math.min(Math.max(s, 45), 80), Math.min(Math.max(l, 45), 65));
+};
+
 const undVal = (u: UnderlyingRow, key: UndKey): string | number => {
   switch (key) {
     case "symbol": return u.symbol;
@@ -77,7 +113,7 @@ export default function App() {
 
   const bg = "#f5f7fa", card = "#ffffff", border = "#d8e0ea", text = "#1a2a3a", muted = "#5a7a9a", accent = "#2a6fb8", mono = "'JetBrains Mono','Fira Code',monospace";
 
-  const colorFor = (und: string) => data?.underlyings.find((u) => u.symbol === und)?.color ?? "#556";
+  const colorFor = (und: string) => lightenForLightTheme(data?.underlyings.find((u) => u.symbol === und)?.color ?? "#556699");
 
   if (error) {
     return (
@@ -130,14 +166,22 @@ export default function App() {
           <div style={{ fontSize: fs(18), color: muted, letterSpacing: "0.12em", textTransform: "uppercase" }}>Portfolio Risk Dashboard</div>
           <div style={{ fontSize: fs(27), color: "#0d2438", fontWeight: 700, marginTop: 2 }}>Notional &amp; Delta Exposure</div>
         </div>
-        <div style={{ display: "flex", gap: 20, flexWrap: "wrap", alignItems: "center" }}>
-          {[["NLV", `$${fmt(data.nlv)}`], ["Notional", `$${fmt(data.totalNotional)}`], ["Notl Lev", `${data.notionalLeverage.toFixed(2)}×`], ["Exposure", `$${fmt(data.totalExposure)}`], ["Exp Lev", `${data.exposureLeverage.toFixed(2)}×`]].map(([l, v]) => (
-            <div key={l} style={{ textAlign: "right" }}>
-              <div style={{ fontSize: fs(16), color: muted, letterSpacing: "0.1em" }}>{l}</div>
-              <div style={{ fontSize: fs(23), color: "#0d2438", fontWeight: 700 }}>{v}</div>
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center" }}>
+          {[
+            [{ label: "NLV", value: `$${fmt(data.nlv)}`, bold: false, size: "12pt" }],
+            [{ label: "Notional", value: `$${fmt(data.totalNotional)}`, bold: false, size: "12pt" }, { label: "Notl Lev", value: `${data.notionalLeverage.toFixed(2)}×`, bold: true, size: "16pt" }],
+            [{ label: "Exposure", value: `$${fmt(data.totalExposure)}`, bold: false, size: "12pt" }, { label: "Exp Lev", value: `${data.exposureLeverage.toFixed(2)}×`, bold: true, size: "16pt" }],
+          ].map((group, gi) => (
+            <div key={gi} style={{ display: "flex", gap: 20, alignItems: "center", padding: "0 16px", borderLeft: gi > 0 ? `1px solid ${border}` : "none" }}>
+              {group.map((m) => (
+                <div key={m.label} style={{ textAlign: "right" }}>
+                  <div style={{ fontSize: fs(16), color: muted, letterSpacing: "0.1em" }}>{m.label}</div>
+                  <div style={{ fontSize: m.size, color: "#0d2438", fontWeight: m.bold ? 700 : 400 }}>{m.value}</div>
+                </div>
+              ))}
             </div>
           ))}
-          <button onClick={load} style={{ background: accent, color: "#fff", border: "none", padding: "6px 14px", borderRadius: 4, cursor: "pointer", fontFamily: mono }}>重新整理</button>
+          <button onClick={load} style={{ background: accent, color: "#fff", border: "none", padding: "6px 14px", borderRadius: 4, cursor: "pointer", fontFamily: mono, marginLeft: 16 }}>重新整理</button>
         </div>
       </div>
 
@@ -147,32 +191,41 @@ export default function App() {
         ))}
       </div>
 
-      <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 20, padding: "4px 24px" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", alignItems: "flex-start", gap: 20, padding: "4px 24px" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 5, paddingTop: 36 }}>
+          {legendUnd.map((u) => (
+            <div key={u.symbol} onMouseEnter={() => setHoveredUnd(u.symbol)} onMouseLeave={() => setHoveredUnd(null)}
+              style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer", background: hoveredUnd === u.symbol ? "#e8eef6" : "transparent", borderRadius: 3, padding: "2px 8px" }}>
+              {u.iconUrl && <img src={u.iconUrl} alt={u.symbol} width={14} height={14} style={{ borderRadius: 2 }} />}
+              <span style={{ color: muted, fontSize: fs(16) }}>{u.symbol}</span>
+              <span style={{ color: "#607888", fontSize: fs(16) }}>{data.totalNotional !== 0 ? ((u.notional / data.totalNotional) * 100).toFixed(1) + "%N" : "—"}</span>
+              <span style={{ color: "#506070", fontSize: fs(16) }}>/{data.totalExposure !== 0 ? ((u.exposure / data.totalExposure) * 100).toFixed(1) + "%E" : "—"}</span>
+            </div>
+          ))}
+        </div>
         <DonutChart data={view === "byUnd" ? undN : posN} total={data.totalNotional} title="名義 Notional" subtitle="Total Notional" nlv={data.nlv} colorFor={colorFor} onHover={setHoveredUnd} hoveredUnd={hoveredUnd} />
         <DonutChart data={view === "byUnd" ? undE : posE} total={data.totalExposure} title="曝險 Delta Exposure" subtitle="Δ-Weighted Exp" nlv={data.nlv} colorFor={colorFor} onHover={setHoveredUnd} hoveredUnd={hoveredUnd} />
       </div>
 
       <div style={{ display: "flex", justifyContent: "center", padding: "14px 24px 6px" }}>
         <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 4, padding: "10px 32px", display: "flex", gap: 40 }}>
-          {[["Net Δ (share-eq)", fmt(data.netDelta), "#2f7fd0"], ["Net Θ/day", `${data.netTheta >= 0 ? "+" : ""}$${fmt(data.netTheta, 2)}`, "#1f9e7a"], ["Net Vega /1%vol", `${data.netVega >= 0 ? "+" : "-"}$${fmt(Math.abs(data.netVega), 2)}`, "#d2601f"]].map(([l, v, c]) => (
-            <div key={l} style={{ textAlign: "center" }}>
-              <div style={{ fontSize: fs(16), color: muted, letterSpacing: "0.1em", marginBottom: 4 }}>{l}</div>
-              <div style={{ fontSize: fs(27), color: c, fontWeight: 700 }}>{v}</div>
-            </div>
-          ))}
+          {[
+            { label: "Net Δ (share-eq)", raw: data.netDelta, value: fmt(data.netDelta), color: "#2f7fd0" },
+            { label: "Net Θ/day", raw: data.netTheta, value: `${data.netTheta >= 0 ? "+" : ""}$${fmt(data.netTheta, 2)}`, color: "#1f9e7a" },
+            { label: "Net Vega /1%vol", raw: data.netVega, value: `${data.netVega >= 0 ? "+" : "-"}$${fmt(Math.abs(data.netVega), 2)}`, color: "#d2601f" },
+          ].map((m) => {
+            const pct = data.nlv !== 0 ? (m.raw / data.nlv) * 100 : null;
+            return (
+              <div key={m.label} style={{ textAlign: "center" }}>
+                <div style={{ fontSize: fs(16), color: muted, letterSpacing: "0.1em", marginBottom: 4 }}>{m.label}</div>
+                <div style={{ fontSize: "12pt", color: m.color, fontWeight: 700 }}>
+                  {m.value}
+                  {pct !== null && <span style={{ fontSize: fs(15), color: muted, fontWeight: 400, marginLeft: 6 }}>({pct >= 0 ? "+" : ""}{pct.toFixed(2)}% NLV)</span>}
+                </div>
+              </div>
+            );
+          })}
         </div>
-      </div>
-
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 5, justifyContent: "center", padding: "6px 24px" }}>
-        {legendUnd.map((u) => (
-          <div key={u.symbol} onMouseEnter={() => setHoveredUnd(u.symbol)} onMouseLeave={() => setHoveredUnd(null)}
-            style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer", background: hoveredUnd === u.symbol ? "#e8eef6" : "transparent", borderRadius: 3, padding: "2px 8px" }}>
-            {u.iconUrl && <img src={u.iconUrl} alt={u.symbol} width={14} height={14} style={{ borderRadius: 2 }} />}
-            <span style={{ color: muted, fontSize: fs(16) }}>{u.symbol}</span>
-            <span style={{ color: "#607888", fontSize: fs(16) }}>{data.totalNotional !== 0 ? ((u.notional / data.totalNotional) * 100).toFixed(1) + "%N" : "—"}</span>
-            <span style={{ color: "#506070", fontSize: fs(16) }}>/{data.totalExposure !== 0 ? ((u.exposure / data.totalExposure) * 100).toFixed(1) + "%E" : "—"}</span>
-          </div>
-        ))}
       </div>
 
       <div style={{ padding: "10px 24px 0" }}>
