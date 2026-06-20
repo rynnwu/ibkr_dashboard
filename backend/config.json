@@ -1,0 +1,16 @@
+{
+  "leveraged_etf_map": {
+    "TSLL": {"underlying": "TSLA", "multiplier": 2},
+    "NVDL": {"underlying": "NVDA", "multiplier": 2},
+    "MSFU": {"underlying": "MSFT", "multiplier": 2},
+    "METU": {"underlying": "META", "multiplier": 2}
+  },
+  "dividend_yield": {
+    "GOOG": 0.005,
+    "MU": 0.004,
+    "TSM": 0.012
+  },
+  "risk_free_rate": 0.0425,
+  "ib_gateway": {"host": "127.0.0.1", "port": 4001, "client_id": 7},
+  "logo_api": {"provider": "financialmodelingprep", "api_key": "enabled"}
+}
