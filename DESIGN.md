@@ -160,17 +160,23 @@ These were all discovered running against a live gateway; the fixes live in
   produces garbage (e.g. Black-Scholes returning ~500% IV). Both underlying
   and option marks are explicitly `math.isnan`-guarded; a position with no
   usable price is dropped into `warnings`, not shown with junk numbers.
-- **G9 — market data is batched; use a *bounded* wait, not `reqTickers`.**
-  `fetch_market_data()` fires every snapshot `reqMktData` up front and waits
-  **once** (a single `ib.sleep`) for replies to stream in concurrently — this is
-  what makes a refresh ~10s instead of ~2 min (see §9). Do **not** swap in
-  ib_insync's `ib.reqTickers`: it awaits *every* snapshot with no timeout and
-  would hang forever if one option's snapshot never ends — the common non-OPRA
-  case (G4). The bounded `ib.sleep` returns with whatever arrived; a symbol that
-  didn't price in the window degrades to a `warnings[]` entry. Underlyings are
-  deduplicated, so an option and its stock share one price fetch. The first
-  request after a (re)connect can be slower / occasionally miss a symbol while
-  IB's market-data lines warm up; it clears on the next refresh.
+- **G9 — market data is batched; use a *bounded, polled* wait, not
+  `reqTickers`.** `fetch_market_data()` fires every snapshot `reqMktData` up
+  front and waits for replies to stream in concurrently — this is what makes a
+  refresh ~10s instead of ~2 min (see §9). Do **not** swap in ib_insync's
+  `ib.reqTickers`: it awaits *every* snapshot with no timeout and would hang
+  forever if one option's snapshot never ends — the common non-OPRA case (G4).
+  The wait is polled in small increments (default 0.5s, up to a 15s ceiling)
+  and exits early once every contract has a usable mark, so the common case is
+  still fast; a contract that hasn't priced by the ceiling degrades to a
+  `warnings[]` entry. Underlyings are deduplicated, so an option and its stock
+  share one price fetch. The first request after a (re)connect can be slower /
+  occasionally miss a symbol while IB's market-data lines warm up; it clears on
+  the next refresh. (Previously this was a single fixed `ib.sleep(8.0)` with no
+  early exit and no extra budget for slow lines — that caused the same
+  illiquid option to intermittently warn on one refresh and price fine on the
+  next, since whatever hadn't arrived by 8s was dropped regardless of how close
+  it was.)
 - **G8 — clientId collisions look like "gateway down".** Each request opens its
   own connection, but with a *fixed* clientId two overlapping connects collide:
   IB returns `Error 326 "client id is already in use"` and ib_insync then hangs
@@ -220,11 +226,10 @@ cd frontend && npm run dev
 ## 9. Known limitations / next steps
 
 - **Refresh takes ~10s** (was ~2 min). Market data for the whole portfolio is
-  fetched in **one batched call** with a single bounded wait, instead of a
-  serial per-position snapshot timeout (see §4 step 2 and gotcha G9). Remaining
-  headroom: the wait is a fixed `timeout`; a smarter version could return as
-  soon as every ticker has a usable mark rather than always sleeping the full
-  window.
+  fetched in **one batched call** with a polled, bounded wait that exits early
+  once every ticker has a usable mark (see §4 step 2 and gotcha G9), instead of
+  a serial per-position snapshot timeout. A symbol that still hasn't priced
+  by the 15s ceiling degrades to a `warnings[]` entry.
 - **Options are priced off the previous close** (see G4), i.e. end-of-day, not
   intraday, unless the account has a live options data feed.
 - **One account.** No multi-account handling.

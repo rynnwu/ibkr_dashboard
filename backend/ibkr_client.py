@@ -71,7 +71,8 @@ def fetch_market_data(
     ib: IB,
     underlying_symbols: Iterable[str],
     option_contracts: list[Option],
-    timeout: float = 8.0,
+    timeout: float = 15.0,
+    poll_interval: float = 0.5,
     exchange: str = "SMART",
     currency: str = "USD",
 ) -> tuple[dict[str, float], dict[int, Ticker]]:
@@ -82,10 +83,10 @@ def fetch_market_data(
       - ``option_ticker_map``: {option conId -> Ticker}
 
     Why batched: ib_insync is asyncio-based, so we can fire all snapshot
-    `reqMktData` requests up front and then wait *once* for replies to stream
-    in concurrently. The old per-position approach paid a separate ~2-6s
+    `reqMktData` requests up front and then wait for replies to stream in
+    concurrently. The old per-position approach paid a separate ~2-6s
     `ib.sleep` for each position serially (DESIGN §9); here the dominant cost
-    collapses to one `timeout` for the entire request. Underlyings are also
+    collapses to one wait for the entire request. Underlyings are also
     deduplicated, so an option and its stock share one price fetch.
 
     A plain snapshot (no genericTickList="106" option-computation tick) avoids
@@ -94,9 +95,15 @@ def fetch_market_data(
     (DESIGN G4). modelGreeks is therefore typically None on option tickers, and
     the caller falls back to calc.implied_vol/calc.bs_greeks off the mark.
 
-    A single bounded `ib.sleep` is used instead of `ib.reqTickers`, because the
-    latter waits on *every* snapshot with no timeout and would hang forever if
-    one option's snapshot never ends (the common non-OPRA case)."""
+    The wait is *polled* in small increments and exits as soon as every
+    contract already has a usable mark (DESIGN §9 "known limitations"),
+    instead of always sleeping the full window — so the common case (all data
+    in within a couple seconds) is still fast, while a slow/just-warming-up
+    line for one symbol (the intermittent "no valid option mark price" case)
+    gets the rest of the budget instead of being dropped immediately. A
+    polled `ib.sleep` is used instead of `ib.reqTickers`, because the latter
+    waits on *every* snapshot with no timeout and would hang forever if one
+    option's snapshot never ends (the common non-OPRA case)."""
     symbols = list(underlying_symbols)
     stock_contracts = [Stock(s, exchange, currency) for s in symbols]
     for c in option_contracts:
@@ -114,7 +121,12 @@ def fetch_market_data(
     ib.qualifyContracts(*all_contracts)
     tickers = [ib.reqMktData(c, "", snapshot=True) for c in all_contracts]
     try:
-        ib.sleep(timeout)
+        elapsed = 0.0
+        while elapsed < timeout:
+            ib.sleep(poll_interval)
+            elapsed += poll_interval
+            if all(not math.isnan(mark_price(t)) for t in tickers):
+                break
     finally:
         for c in all_contracts:
             ib.cancelMktData(c)
