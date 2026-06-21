@@ -56,13 +56,13 @@ is on-demand, not realtime.
 
 | File | Responsibility | Notes |
 |---|---|---|
-| `backend/calc.py` | **Pure math, no I/O.** Notional/exposure/discount, Black-Scholes price/IV/Greeks, aggregation, leverage, Greeks card, **margin-buffer summary** (`margin_summary`). | Fully unit-tested. Flat module functions (intentional — no classes). |
+| `backend/calc.py` | **Pure math, no I/O.** Notional/exposure/discount, Black-Scholes price/IV/Greeks, aggregation, leverage, Greeks card, **margin-buffer summary** (`margin_summary`), **roll what-if** (`roll_what_if`, `regt_short_put_maint`, `exposure_match_sizing`, `call_strike_for_delta`, shared `cushion_level`). | Fully unit-tested. Flat module functions (intentional — no classes). |
 | `backend/config.py` | Load + expose `config.json` as a `Config` dataclass. | `dividend_yield_for(sym)` defaults to 0. `margin_warning_cushion`/`margin_danger_cushion` default to 0.20/0.10. |
 | `backend/config.json` | Runtime config (no secrets needed). | leveraged-ETF map, dividend yields, risk-free rate, gateway host/port/clientId, logo API, `margin_thresholds` (cushion levels for the margin card). |
 | `backend/icons.py` | Per-symbol logo fetch + on-disk cache + dominant-color extraction, with a generated text-icon + hashed-color fallback. | Network call is injectable (`getter=`) so tests never hit the net. Cache: `backend/icon_cache/` (gitignored). |
 | `backend/ibkr_client.py` | **Thin `ib_insync` wrapper. The only module that does IBKR I/O.** connect / positions / **account values** (`fetch_account_values`: NLV + margin tags in one `accountSummary` call) / NLV (`fetch_nlv`, now a wrapper) / **batched** market data (`fetch_market_data`) / `mark_price`. | Deliberately no automated tests (needs a live gateway). **Never** calls any order/account-modifying method. |
 | `backend/cache.py` | **On-disk last-good snapshot** of the `/api/portfolio` payload — save / load / `now_iso`. No IBKR I/O, fully unit-tested. | Backs the offline fallback (§10). Cache file: `backend/portfolio_cache.json` (gitignored). |
-| `backend/main.py` | FastAPI app + the wiring: `get_portfolio` route, the pure `build_portfolio_response`, the I/O glue `_collect_positions` (batch-fetches market data), the **pure** `_position_to_record` (reads from the fetched maps), and `_build_margin` (turns account values into the margin block via `calc.margin_summary`). | Also mounts `/icons` static files (see §5, gotcha G6). |
+| `backend/main.py` | FastAPI app + the wiring: `get_portfolio` route, the pure `build_portfolio_response`, the I/O glue `_collect_positions` (batch-fetches market data), the **pure** `_position_to_record` (reads from the fetched maps), `_build_margin` (turns account values into the margin block via `calc.margin_summary`), and the **`compute_roll_what_if`** / **`price_option`** / **`suggest_call`** POST routes (no IBKR I/O — see §11). | Also mounts `/icons` static files (see §5, gotcha G6). |
 
 Tests live in `backend/tests/` (`test_calc`, `test_config`, `test_icons`,
 `test_main`) and run with `backend/.venv/bin/pytest backend/tests/`.
@@ -144,7 +144,9 @@ The response JSON shape is the contract with the frontend; it must stay in
 sync with `frontend/src/types.ts` (`PortfolioResponse`, `MarginSummary`). It
 carries two cache-status fields — `stale` (bool) and `cachedAt` (local-time
 ISO 8601, or null) — see §10 — and the `margin` block (or `null`) described
-above.
+above. Each position record also carries `strike`, `mark` (per-share option mark; both
+`null` for stock) and `daysToExpiry`, plus `quantity`/`underlying_price`/`iv`,
+surfaced for the roll what-if SP picker and its model-pricing (§11).
 
 ## 5. Frontend
 
@@ -305,3 +307,56 @@ only an error screen.
 - **Deliberately no TTL.** A snapshot never "expires"; staleness is surfaced
   via the banner/`cachedAt` and left to the user to judge. (If a hard cap is
   ever wanted, that's the single place to add it.)
+
+## 11. Roll what-if (換倉資金/保證金試算)
+
+Goal: estimate, on the dashboard, the effect of **closing a short put and
+opening a long call (or buying a 2x ETF)** on (a) the margin/liquidation buffer
+and (b) whether there's enough cash to execute the roll. It's an extension of
+the margin-buffer card (§4) — same two axes (liquidation vs. funding), same
+`cushion_level` thresholds. Full derivation + limitations live in
+[`TODO.md`](TODO.md).
+
+- **Backend math** is pure in `calc.py`:
+  - `roll_what_if(...)` — given current `excess_liquidity`/`nlv` (+ optional
+    `cash`/`available_funds`), the released `mm_sp`, the close debit `D`, and
+    the replacement leg (call premium and/or ETF value × maint rate), returns
+    EL/cushion/level **before→after** plus the funding `surplus`/`canExecute`/
+    `shortfall`. ΔEL = +mm_sp (release SP) − premium (long call, no loan value)
+    − maint_rate×V (ETF). Funding outflow = D + premium + ETF value.
+  - `regt_short_put_maint(...)` — Reg T naked-put maintenance approximation, the
+    **default** for the most fragile input (`mm_sp`); the UI lets the user
+    override it with the actual TWS What-If figure.
+  - `exposure_match_sizing(...)` — sizes a replacement leg to match the SP's
+    current delta exposure (helper; not yet surfaced in the UI).
+- **Endpoints** (both thin, **I/O-free** wrappers — no gateway connection):
+  - `POST /api/roll-what-if` (`compute_roll_what_if`): the client already holds
+    the current account figures (from the latest `/api/portfolio` margin block),
+    so it sends them in the request and the route just runs the pure calc +
+    config thresholds. Mirrors `RollWhatIfRequest`/`RollWhatIfResult`.
+  - `POST /api/price-option` (`price_option`): Black-Scholes model price + Greeks
+    for one leg given S/K/days-to-expiry/right/IV (risk-free rate from config).
+    Lets the panel **model-price** a leg via `calc.bs_price`/`bs_greeks` — the
+    same single-sourced math as the portfolio fetch. Mirrors
+    `PriceOptionRequest`/`PriceOptionResult`.
+  - `POST /api/suggest-call` (`suggest_call`): suggests a replacement long-call
+    strike at a **target delta** = max(|SP delta|, `minDelta`) via the
+    closed-form `calc.call_strike_for_delta` (inverse of BS delta), rounds it to
+    a whole dollar, and prices it. The frontend defaults `daysToExpiry` to ~180
+    and `minDelta` to 0.85. Mirrors `SuggestCallRequest`/`SuggestCallResult`.
+- **Frontend** `components/RollWhatIf.tsx` — a collapsible panel under the
+  margin card. Lists **every** short put from the live positions (auto-fills
+  S/K/contracts/IV/days from `strike`/`quantity`/`underlying_price`/`iv`/
+  `daysToExpiry`). The put's mark is the live `mark` when present, else
+  **model-priced off its IV** via `/api/price-option` (tagged 市場/模型) — so a
+  leg with no OPRA quote (mark `null`) is still selectable. The long-call leg defaults to a
+  **~180 DTE** call whose strike is auto-suggested (`/api/suggest-call`) to a
+  delta of max(|SP delta|, 0.85), priced off the SP's IV; `Q` defaults to the
+  SP's contract count. The user can re-derive the strike (`依 Δ 建議履約價`),
+  re-price an edited strike (`依模型估算 Call`), or delta-exposure-match Q. Takes an optional `MM_SP` override, and shows
+  the before→after level chips + funding verdict. Renders a note when there's no
+  margin block or no short put.
+- **Hard limit** (carried as an in-UI caveat): this is an order-of-magnitude
+  estimate. IBKR uses TIMS/SPAN scenario models (esp. Portfolio Margin —
+  whole-account, non-linear, not decomposable per-leg), so a PM account must
+  treat TWS What-If as authoritative.

@@ -2,7 +2,15 @@
 
 > 待辦/未來工作清單。先讀 [`DESIGN.md`](DESIGN.md) 了解整體架構,再動工。
 
-## 換倉資金可行性 + 保證金 what-if 工具
+## ✅ 換倉資金可行性 + 保證金 what-if 工具(已實作)
+
+> **已完成** — 見 [`DESIGN.md`](DESIGN.md) §11。後端 `calc.roll_what_if` /
+> `regt_short_put_maint` / `exposure_match_sizing`(純函式、有單元測試)+
+> `POST /api/roll-what-if`(無 I/O);前端 `components/RollWhatIf.tsx` 面板。
+> 下方原始設計筆記保留作為公式/限制的參考。
+>
+> 未來可延伸:把 `exposure_match_sizing`(曝險匹配 sizing)接進 UI 自動帶入
+> call 口數 / ETF 市值;支援多腿 SP 同時平倉;建模 LookAhead。
 
 **目標**:在 dashboard 上估算「平倉 short put → 改開 long call / 買 2x ETF」
 換倉後的 (a) 保證金緩衝變化、(b) 是否有足夠現金/可動用資金執行換倉。

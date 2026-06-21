@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from ib_insync import IB, Position
+from pydantic import BaseModel
 
 from backend import cache, calc, config, ibkr_client, icons
 
@@ -87,6 +88,123 @@ def get_portfolio() -> dict:
 
     cache.save_portfolio(payload)
     return payload
+
+
+class RollWhatIfRequest(BaseModel):
+    """Inputs for the roll what-if estimate. Current account figures
+    (excessLiquidity/nlv/cash/availableFunds) come from the client, which
+    already holds them from the latest /api/portfolio margin block — so this
+    endpoint does *no* IBKR I/O and just runs the pure calc."""
+
+    excessLiquidity: float
+    nlv: float
+    cash: float | None = None
+    availableFunds: float | None = None
+    loanValueOther: float = 0.0
+    # Short put leg to close (used to derive D and the Reg T MM_SP fallback).
+    spContracts: float
+    spUnderlyingPrice: float
+    spStrike: float
+    spPutMark: float
+    # When set, used verbatim instead of the Reg T approximation (TWS What-If).
+    mmSpOverride: float | None = None
+    # Replacement legs — either/both. Premium = call_mark * 100 * Q (client-side).
+    openCallPremium: float = 0.0
+    openEtfValue: float = 0.0
+    etfMaintRate: float = 0.50
+
+
+@app.post("/api/roll-what-if")
+def compute_roll_what_if(req: RollWhatIfRequest) -> dict:
+    """Pure roll what-if estimate (no gateway connection). See calc.roll_what_if
+    and TODO.md for the math + limitations."""
+    cfg = config.load_config(CONFIG_PATH)
+    mm_sp = (
+        req.mmSpOverride
+        if req.mmSpOverride is not None
+        else calc.regt_short_put_maint(req.spContracts, req.spUnderlyingPrice, req.spStrike, req.spPutMark)
+    )
+    close_sp_debit = abs(req.spContracts) * 100 * req.spPutMark
+    result = calc.roll_what_if(
+        excess_liquidity=req.excessLiquidity,
+        nlv=req.nlv,
+        mm_sp=mm_sp,
+        close_sp_debit=close_sp_debit,
+        open_call_premium=req.openCallPremium,
+        open_etf_value=req.openEtfValue,
+        etf_maint_rate=req.etfMaintRate,
+        cash=req.cash,
+        available_funds=req.availableFunds,
+        loan_value_other=req.loanValueOther,
+        warning_cushion=cfg.margin_warning_cushion,
+        danger_cushion=cfg.margin_danger_cushion,
+    )
+    result["mmSpAuto"] = req.mmSpOverride is None
+    return result
+
+
+class PriceOptionRequest(BaseModel):
+    """Inputs for a Black-Scholes model price of a single option leg. Used by the
+    roll what-if to fill model defaults (the put's mark when the gateway gave no
+    quote, and a suggested long-call premium) — see calc.bs_price/bs_greeks."""
+
+    underlyingPrice: float
+    strike: float
+    daysToExpiry: int
+    right: str  # "C" or "P"
+    iv: float  # implied volatility in percent (e.g. 45.0 for 45%)
+    dividendYield: float = 0.0
+
+
+@app.post("/api/price-option")
+def price_option(req: PriceOptionRequest) -> dict:
+    """Black-Scholes model price + Greeks for one option leg (no IBKR I/O).
+    The risk-free rate comes from config; IV is supplied by the caller (the
+    roll what-if defaults it to the short put's own IV)."""
+    cfg = config.load_config(CONFIG_PATH)
+    T = max(req.daysToExpiry, 1) / 365.0
+    sigma = req.iv / 100.0
+    right = "C" if req.right == "C" else "P"
+    mark = calc.bs_price(req.underlyingPrice, req.strike, T, cfg.risk_free_rate, req.dividendYield, sigma, right)
+    greeks = calc.bs_greeks(req.underlyingPrice, req.strike, T, cfg.risk_free_rate, req.dividendYield, sigma, right)
+    return {"mark": mark, "delta": greeks["delta"], "theta": greeks["theta"], "vega": greeks["vega"], "iv": req.iv}
+
+
+class SuggestCallRequest(BaseModel):
+    """Inputs for suggesting a replacement long-call strike. Picks the strike
+    whose model call delta equals max(|short put delta|, minDelta) at the given
+    DTE/IV, then prices it. No IBKR I/O."""
+
+    underlyingPrice: float
+    shortPutDelta: float  # the SP's delta (signed or magnitude; abs is used)
+    iv: float  # implied volatility in percent
+    daysToExpiry: int = 180
+    minDelta: float = 0.85
+    dividendYield: float = 0.0
+
+
+@app.post("/api/suggest-call")
+def suggest_call(req: SuggestCallRequest) -> dict:
+    """Suggest a long-call strike replicating (or exceeding) the short put's
+    delta — target = max(|SP delta|, minDelta), capped just under 1 — and price
+    it via Black-Scholes. Strike is rounded to a whole dollar and re-priced so
+    the returned mark/delta match the rounded strike."""
+    cfg = config.load_config(CONFIG_PATH)
+    T = max(req.daysToExpiry, 1) / 365.0
+    sigma = req.iv / 100.0
+    target = min(max(abs(req.shortPutDelta), req.minDelta), 0.99)
+    raw_strike = calc.call_strike_for_delta(req.underlyingPrice, target, T, cfg.risk_free_rate, req.dividendYield, sigma)
+    strike = max(round(raw_strike), 1.0)
+    mark = calc.bs_price(req.underlyingPrice, strike, T, cfg.risk_free_rate, req.dividendYield, sigma, "C")
+    greeks = calc.bs_greeks(req.underlyingPrice, strike, T, cfg.risk_free_rate, req.dividendYield, sigma, "C")
+    return {
+        "strike": strike,
+        "daysToExpiry": req.daysToExpiry,
+        "iv": req.iv,
+        "targetDelta": target,
+        "mark": mark,
+        "delta": greeks["delta"],
+    }
 
 
 def _fetch_live_portfolio(cfg: config.Config) -> dict:
@@ -171,16 +289,17 @@ def _position_to_record(
         if ticker is None:
             raise ValueError(f"no option market data for {contract.localSymbol}")
         notional = calc.option_notional(pos.position, underlying_price)
+        mark = ibkr_client.mark_price(ticker)
+        days = _days_to_expiry(contract.lastTradeDateOrContractMonth)
         if ticker.modelGreeks and ticker.modelGreeks.delta is not None:
             delta = ticker.modelGreeks.delta
             theta = ticker.modelGreeks.theta or 0.0
             vega = ticker.modelGreeks.vega or 0.0
             iv = (ticker.modelGreeks.impliedVol or 0.0) * 100
         else:
-            mark = ibkr_client.mark_price(ticker)
             if math.isnan(mark):
                 raise ValueError(f"no valid option mark price for {contract.localSymbol}")
-            T = _years_to_expiry(contract.lastTradeDateOrContractMonth)
+            T = days / 365.0
             q = cfg.dividend_yield_for(contract.symbol)
             right = "C" if contract.right == "C" else "P"
             sigma = calc.implied_vol(mark, underlying_price, contract.strike, T, cfg.risk_free_rate, q, right)
@@ -194,6 +313,11 @@ def _position_to_record(
             "notional": notional, "exposure": exposure, "discount": calc.discount(notional, exposure),
             "delta": delta, "theta": theta, "vega": vega, "iv": iv, "underlying_price": underlying_price,
             "quantity": pos.position,
+            # Surfaced for the roll what-if SP picker (strike, per-share mark,
+            # days-to-expiry). `mark` is None when no live/close price priced the
+            # leg; the picker then model-prices it off `iv` via /api/price-option.
+            "strike": contract.strike, "mark": None if math.isnan(mark) else mark,
+            "daysToExpiry": days,
         }
 
     mapping = cfg.leveraged_etf_map.get(contract.symbol)
@@ -212,11 +336,16 @@ def _position_to_record(
         "notional": notional, "exposure": notional, "discount": 0.0,
         "delta": delta, "theta": 0.0, "vega": 0.0, "iv": None, "underlying_price": price,
         "quantity": pos.position,
+        "strike": None, "mark": None, "daysToExpiry": None,
     }
+
+
+def _days_to_expiry(expiry_str: str) -> int:
+    """Calendar days from today to an IB-format YYYYMMDD expiry (floored at 1)."""
+    expiry = date(int(expiry_str[:4]), int(expiry_str[4:6]), int(expiry_str[6:8]))
+    return max((expiry - date.today()).days, 1)
 
 
 def _years_to_expiry(expiry_str: str) -> float:
     """Converts an IB-format YYYYMMDD expiry string into a year fraction from today (floored at 1/365)."""
-    expiry = date(int(expiry_str[:4]), int(expiry_str[4:6]), int(expiry_str[6:8]))
-    days = max((expiry - date.today()).days, 1)
-    return days / 365.0
+    return _days_to_expiry(expiry_str) / 365.0

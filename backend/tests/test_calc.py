@@ -92,6 +92,122 @@ def test_portfolio_leverage_returns_zero_when_nlv_is_zero():
     assert result == {"notional_leverage": 0.0, "exposure_leverage": 0.0}
 
 
+def test_cushion_level_bands():
+    assert calc.cushion_level(0.50) == "safe"
+    assert calc.cushion_level(0.15) == "warning"
+    assert calc.cushion_level(0.05) == "danger"
+    # custom thresholds
+    assert calc.cushion_level(0.30, warning_cushion=0.50, danger_cushion=0.40) == "danger"
+
+
+def test_regt_short_put_maint_otm_uses_20pct_minus_otm_amount():
+    # S=200, K=180 (OTM put), put_mark=2 -> per share = max(0.20*200-(200-180),0.10*180)+2
+    # = max(40-20, 18)+2 = 20+2 = 22 ; 2 contracts -> 2*100*22 = 4400
+    assert calc.regt_short_put_maint(contracts=-2, S=200, K=180, put_mark=2) == pytest.approx(4400.0)
+
+
+def test_regt_short_put_maint_deep_otm_floors_at_10pct_strike():
+    # S=300 far above K=100 -> 0.20*300-(300-100)=60-200=-140 -> floored to 0.10*100=10
+    # per share = 10 + put_mark(1) = 11 ; 1 contract -> 1100
+    assert calc.regt_short_put_maint(contracts=1, S=300, K=100, put_mark=1) == pytest.approx(1100.0)
+
+
+def test_call_strike_for_delta_round_trips_through_bs_greeks():
+    # The strike produced for a target delta should, when priced, recover it.
+    S, T, r, q, sigma = 250.0, 180 / 365.0, 0.0425, 0.0, 0.45
+    for target in (0.60, 0.85, 0.95):
+        K = calc.call_strike_for_delta(S, target, T, r, q, sigma)
+        recovered = calc.bs_greeks(S, K, T, r, q, sigma, "C")["delta"]
+        assert recovered == pytest.approx(target, abs=1e-3)
+
+
+def test_call_strike_for_delta_higher_delta_is_deeper_itm():
+    S, T, r, q, sigma = 250.0, 0.5, 0.0425, 0.0, 0.4
+    k_low = calc.call_strike_for_delta(S, 0.60, T, r, q, sigma)
+    k_high = calc.call_strike_for_delta(S, 0.90, T, r, q, sigma)
+    # higher delta -> deeper ITM -> lower strike
+    assert k_high < k_low < S * 2
+
+
+def test_roll_what_if_close_sp_into_long_call_margin_and_funding():
+    result = calc.roll_what_if(
+        excess_liquidity=50000.0, nlv=200000.0,
+        mm_sp=8000.0, close_sp_debit=2000.0,
+        open_call_premium=3000.0,
+        cash=10000.0, available_funds=20000.0,
+    )
+    # EL: 50000 + 8000 (release SP) - 3000 (call premium) = 55000
+    assert result["excessLiquidityAfter"] == pytest.approx(55000.0)
+    assert result["cushionAfter"] == pytest.approx(55000.0 / 200000.0)
+    assert result["levelAfter"] == "safe"
+    assert result["deltaExcessLiquidity"]["closeShortPut"] == 8000.0
+    assert result["deltaExcessLiquidity"]["openLongCall"] == -3000.0
+    # Funding outflow = D + premium = 2000 + 3000 = 5000; surplus = 10000 - 5000
+    assert result["fundingOutflow"] == pytest.approx(5000.0)
+    assert result["surplus"] == pytest.approx(5000.0)
+    assert result["canExecute"] is True
+    assert result["shortfall"] == 0.0
+    assert result["availableFundsAfter"] == pytest.approx(28000.0)  # 20000 + 8000 released
+
+
+def test_roll_what_if_funding_shortfall_when_cash_insufficient():
+    result = calc.roll_what_if(
+        excess_liquidity=50000.0, nlv=200000.0,
+        mm_sp=8000.0, close_sp_debit=9000.0, open_call_premium=4000.0,
+        cash=10000.0, loan_value_other=1000.0,
+    )
+    # outflow 13000, funds 11000 -> surplus -2000
+    assert result["surplus"] == pytest.approx(-2000.0)
+    assert result["canExecute"] is False
+    assert result["shortfall"] == pytest.approx(2000.0)
+
+
+def test_roll_what_if_buy_2x_etf_ties_up_maintenance_margin():
+    result = calc.roll_what_if(
+        excess_liquidity=50000.0, nlv=200000.0,
+        mm_sp=8000.0, close_sp_debit=2000.0,
+        open_etf_value=20000.0, etf_maint_rate=0.5,
+        cash=30000.0,
+    )
+    # EL: 50000 + 8000 - (0.5*20000)=10000 -> 48000
+    assert result["excessLiquidityAfter"] == pytest.approx(48000.0)
+    assert result["deltaExcessLiquidity"]["buyLeveragedEtf"] == pytest.approx(-10000.0)
+    # funding outflow = D + ETF value (cash-bought) = 2000 + 20000 = 22000
+    assert result["fundingOutflow"] == pytest.approx(22000.0)
+    assert result["surplus"] == pytest.approx(8000.0)
+
+
+def test_roll_what_if_omits_funding_when_cash_not_supplied():
+    result = calc.roll_what_if(
+        excess_liquidity=50000.0, nlv=200000.0, mm_sp=8000.0, close_sp_debit=2000.0,
+    )
+    assert "surplus" not in result
+    assert "canExecute" not in result
+    assert "availableFundsAfter" not in result
+
+
+def test_roll_what_if_level_can_flip_to_danger():
+    result = calc.roll_what_if(
+        excess_liquidity=30000.0, nlv=200000.0,
+        mm_sp=0.0, close_sp_debit=0.0, open_call_premium=15000.0,
+    )
+    # 30000 - 15000 = 15000 -> cushion 7.5% < 10% danger
+    assert result["levelBefore"] == "warning"  # 15% in [10,20)
+    assert result["levelAfter"] == "danger"
+
+
+def test_exposure_match_sizing_call_and_etf():
+    # |contracts|=2, S=200, |delta_sp|=0.4 -> E_target = 2*100*200*0.4 = 16000
+    result = calc.exposure_match_sizing(
+        contracts=-2, underlying_price=200.0, delta_sp=-0.4,
+        call_delta=0.5, etf_leverage=2.0, etf_price=20.0,
+    )
+    assert result["exposureTarget"] == pytest.approx(16000.0)
+    assert result["callContracts"] == pytest.approx(16000.0 / (100 * 200 * 0.5))  # 1.6
+    assert result["etfValue"] == pytest.approx(8000.0)
+    assert result["etfShares"] == pytest.approx(400.0)
+
+
 def test_greeks_card_sums_option_positions_only():
     option_positions = [
         {"delta_shares": 100.0, "theta": 5.0, "vega": -2.0},

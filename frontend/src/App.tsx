@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import DonutChart from "./components/DonutChart";
+import RollWhatIf from "./components/RollWhatIf";
 import { fetchPortfolio } from "./api";
 import type { PortfolioResponse, UnderlyingRow, PositionRow, MarginSummary } from "./types";
 
@@ -239,7 +240,7 @@ export default function App() {
             ].map((m) => (
               <div key={m.label} style={{ textAlign: "center" }}>
                 <div style={{ fontSize: fs(16), color: muted, letterSpacing: "0.1em", marginBottom: 4 }}>{m.label}</div>
-                <div style={{ fontSize: "12pt", color: ("color" in m && m.color) ? m.color : (m.strong ? MARGIN_STYLE[data.margin.level].fg : "#0d2438"), fontWeight: m.strong ? 700 : 400 }}>{m.value}</div>
+                <div style={{ fontSize: "12pt", color: ("color" in m && m.color) ? m.color : (m.strong ? MARGIN_STYLE[data.margin!.level].fg : "#0d2438"), fontWeight: m.strong ? 700 : 400 }}>{m.value}</div>
               </div>
             ))}
             {data.margin.canOpenNew === false && (
@@ -250,6 +251,8 @@ export default function App() {
           </div>
         </div>
       )}
+
+      <RollWhatIf data={data} />
 
       <div style={{ display: "flex", justifyContent: "center", padding: "14px 0 6px", gap: 8 }}>
         {([["byUnd", "依標的"], ["byPos", "依倉位"]] as const).map(([v, l]) => (
