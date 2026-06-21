@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { fetchRollWhatIf, fetchPriceOption, fetchSuggestCall } from "../api";
+import useIsMobile from "../hooks/useIsMobile";
 import type { PortfolioResponse, PositionRow, RollWhatIfResult, MarginLevel } from "../types";
 
 const FONT_SCALE = 10 / 16;
@@ -58,6 +59,8 @@ const linkBtn: React.CSSProperties = {
 };
 
 export default function RollWhatIf({ data }: { data: PortfolioResponse }) {
+  const isMobile = useIsMobile();
+  const pad = isMobile ? 12 : 24;
   const [open, setOpen] = useState(false);
   const [spIdx, setSpIdx] = useState(0);
   const [repl, setRepl] = useState<"call" | "etf">("call");
@@ -196,7 +199,7 @@ export default function RollWhatIf({ data }: { data: PortfolioResponse }) {
   };
 
   const headerBtn = (
-    <div style={{ display: "flex", justifyContent: "center", padding: "10px 24px 0" }}>
+    <div style={{ display: "flex", justifyContent: "center", padding: `10px ${pad}px 0` }}>
       <button onClick={() => setOpen((o) => !o)} style={{ background: "transparent", border: `1px solid ${border}`, color: muted, fontFamily: mono, fontSize: fs(18), letterSpacing: "0.08em", padding: "5px 16px", borderRadius: 3, cursor: "pointer" }}>
         {open ? "▾" : "▸"} 換倉試算 Roll What-If
       </button>
@@ -208,8 +211,8 @@ export default function RollWhatIf({ data }: { data: PortfolioResponse }) {
   return (
     <>
       {headerBtn}
-      <div style={{ display: "flex", justifyContent: "center", padding: "8px 24px 0" }}>
-        <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 4, padding: "14px 24px", maxWidth: 920, width: "100%" }}>
+      <div style={{ display: "flex", justifyContent: "center", padding: `8px ${pad}px 0` }}>
+        <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 4, padding: isMobile ? "14px 14px" : "14px 24px", maxWidth: 920, width: "100%" }}>
           {!data.margin ? (
             <div style={{ color: muted, fontSize: fs(18) }}>無保證金資料(可能為現金帳戶),無法試算。</div>
           ) : shortPuts.length === 0 ? (
