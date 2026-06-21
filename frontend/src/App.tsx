@@ -71,6 +71,10 @@ const hslToHex = (h: number, s: number, l: number): string => {
 };
 const lightenForLightTheme = (hex: string): string => {
   const [h, s, l] = hexToHsl(hex);
+  // Achromatic colors (black/white/gray) have no real hue, so boosting
+  // saturation would tint them with the meaningless default hue (0 = red).
+  // Keep them neutral and only adjust lightness.
+  if (s === 0) return hslToHex(0, 0, Math.min(Math.max(l, 45), 65));
   return hslToHex(h, Math.min(Math.max(s, 45), 80), Math.min(Math.max(l, 45), 65));
 };
 
