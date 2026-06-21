@@ -60,11 +60,43 @@ def fetch_positions(ib: IB) -> list[Position]:
     return ib.positions()
 
 
-def fetch_nlv(ib: IB) -> float:
+# Account-summary tags we read. NetLiquidation drives leverage; the rest feed
+# the margin-buffer card. ib_insync's accountSummary() returns the full default
+# tag set in one call, so all of these arrive together (no extra round-trips).
+# All read-only — no order/account-modifying calls (DESIGN §6).
+ACCOUNT_VALUE_TAGS = (
+    "NetLiquidation",
+    "MaintMarginReq",
+    "ExcessLiquidity",
+    "LookAheadMaintMarginReq",
+    "LookAheadExcessLiquidity",
+    # Funding axis (distinct from liquidation risk): can we still open/roll?
+    # AvailableFunds = ELV - InitMargin (always <= ExcessLiquidity, so it goes
+    # to zero first); TotalCashValue is the literal cash balance.
+    "TotalCashValue",
+    "AvailableFunds",
+)
+
+
+def fetch_account_values(ib: IB) -> dict[str, float]:
+    """Returns the subset of account-summary values in ACCOUNT_VALUE_TAGS as
+    floats (tags whose value won't parse as a number are skipped). One
+    accountSummary() call covers both NLV and all margin fields."""
+    values: dict[str, float] = {}
     for v in ib.accountSummary():
-        if v.tag == "NetLiquidation":
-            return float(v.value)
-    raise ValueError("NetLiquidation not found in account summary")
+        if v.tag in ACCOUNT_VALUE_TAGS:
+            try:
+                values[v.tag] = float(v.value)
+            except ValueError:
+                pass
+    return values
+
+
+def fetch_nlv(ib: IB) -> float:
+    values = fetch_account_values(ib)
+    if "NetLiquidation" not in values:
+        raise ValueError("NetLiquidation not found in account summary")
+    return values["NetLiquidation"]
 
 
 def fetch_market_data(

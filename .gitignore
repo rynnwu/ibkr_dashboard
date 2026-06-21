@@ -4,5 +4,6 @@ __pycache__/
 *.pyc
 .venv/
 backend/icon_cache/
+backend/portfolio_cache.json
 .claude/
 logs/

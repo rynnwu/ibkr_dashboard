@@ -7,15 +7,135 @@ from backend import main
 from backend import config as config_module
 
 
-def test_portfolio_endpoint_returns_503_when_gateway_unreachable(monkeypatch):
+def test_portfolio_endpoint_returns_503_when_gateway_unreachable_and_no_cache(monkeypatch):
     def raise_connect(*a, **k):
         raise ConnectionRefusedError("no gateway")
 
     monkeypatch.setattr(main.ibkr_client, "connect", raise_connect)
+    monkeypatch.setattr(main.cache, "load_portfolio", lambda *a, **k: None)
     client = TestClient(main.app)
     resp = client.get("/api/portfolio")
     assert resp.status_code == 503
     assert "IB Gateway" in resp.json()["detail"]
+
+
+def test_portfolio_endpoint_serves_cached_snapshot_when_gateway_unreachable(monkeypatch):
+    def raise_connect(*a, **k):
+        raise ConnectionRefusedError("no gateway")
+
+    cached_payload = {"nlv": 123.0, "positions": [], "underlyings": [], "warnings": [], "stale": True, "cachedAt": "2026-06-21T08:00:00+08:00"}
+    monkeypatch.setattr(main.ibkr_client, "connect", raise_connect)
+    monkeypatch.setattr(main.cache, "load_portfolio", lambda *a, **k: cached_payload)
+    client = TestClient(main.app)
+    resp = client.get("/api/portfolio")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["stale"] is True
+    assert body["nlv"] == 123.0
+    assert body["cachedAt"] == "2026-06-21T08:00:00+08:00"
+
+
+def test_roll_what_if_endpoint_uses_regt_fallback_and_returns_estimate():
+    client = TestClient(main.app)
+    resp = client.post("/api/roll-what-if", json={
+        "excessLiquidity": 50000.0, "nlv": 200000.0,
+        "cash": 10000.0, "availableFunds": 20000.0,
+        "spContracts": 2, "spUnderlyingPrice": 200.0, "spStrike": 180.0, "spPutMark": 2.0,
+        "openCallPremium": 3000.0,
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mmSpAuto"] is True
+    # Reg T MM_SP = 2*100*(max(40-20,18)+2) = 4400; D = 2*100*2 = 400
+    assert body["mmSp"] == pytest.approx(4400.0)
+    assert body["closeSpDebit"] == pytest.approx(400.0)
+    assert body["excessLiquidityAfter"] == pytest.approx(50000.0 + 4400.0 - 3000.0)
+    # surplus = cash - (D + premium) = 10000 - (400 + 3000)
+    assert body["surplus"] == pytest.approx(6600.0)
+    assert body["canExecute"] is True
+
+
+def test_roll_what_if_endpoint_honors_mm_sp_override():
+    client = TestClient(main.app)
+    resp = client.post("/api/roll-what-if", json={
+        "excessLiquidity": 50000.0, "nlv": 200000.0,
+        "spContracts": 1, "spUnderlyingPrice": 200.0, "spStrike": 180.0, "spPutMark": 2.0,
+        "mmSpOverride": 12345.0,
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mmSpAuto"] is False
+    assert body["mmSp"] == 12345.0
+
+
+def test_price_option_endpoint_matches_black_scholes():
+    client = TestClient(main.app)
+    resp = client.post("/api/price-option", json={
+        "underlyingPrice": 100.0, "strike": 100.0, "daysToExpiry": 365,
+        "right": "C", "iv": 20.0,
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    # S=K=100, T=1y, r=config 4.25%, q=0, sigma=20% -> BS call ~10.06
+    assert body["mark"] == pytest.approx(10.06, abs=0.05)
+    assert 0.0 < body["delta"] < 1.0
+    assert body["iv"] == 20.0
+
+
+def test_price_option_endpoint_put_delta_is_negative():
+    client = TestClient(main.app)
+    resp = client.post("/api/price-option", json={
+        "underlyingPrice": 200.0, "strike": 180.0, "daysToExpiry": 30,
+        "right": "P", "iv": 45.0,
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mark"] > 0.0
+    assert -1.0 < body["delta"] < 0.0
+
+
+def test_suggest_call_endpoint_floors_delta_at_min_and_prices_strike():
+    client = TestClient(main.app)
+    # SP delta 0.70 magnitude but minDelta 0.85 -> target 0.85
+    resp = client.post("/api/suggest-call", json={
+        "underlyingPrice": 250.0, "shortPutDelta": -0.70, "iv": 45.0,
+        "daysToExpiry": 180, "minDelta": 0.85,
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["targetDelta"] == pytest.approx(0.85)
+    assert body["daysToExpiry"] == 180
+    assert body["strike"] < 250.0  # ITM call
+    assert body["mark"] > 0.0
+    # strike is rounded to a whole dollar, so the priced delta is near (not exactly) target
+    assert body["delta"] == pytest.approx(0.85, abs=0.02)
+
+
+def test_suggest_call_endpoint_uses_sp_delta_when_above_min():
+    client = TestClient(main.app)
+    resp = client.post("/api/suggest-call", json={
+        "underlyingPrice": 100.0, "shortPutDelta": -0.92, "iv": 50.0,
+    })
+    assert resp.status_code == 200
+    assert resp.json()["targetDelta"] == pytest.approx(0.92)
+
+
+def test_position_to_record_option_carries_days_to_expiry():
+    from datetime import date, timedelta
+    expiry_str = (date.today() + timedelta(days=30)).strftime("%Y%m%d")
+    contract = SimpleNamespace(
+        secType="OPT", symbol="TSLA", strike=200.0, right="P",
+        lastTradeDateOrContractMonth=expiry_str, conId=1,
+    )
+    pos = SimpleNamespace(contract=contract, position=-2)
+    fake_ticker = SimpleNamespace(
+        modelGreeks=SimpleNamespace(delta=-0.4, theta=-0.3, vega=0.2, impliedVol=0.5),
+        marketPrice=lambda: 8.0,
+    )
+    record = main._position_to_record(pos, _fake_cfg(), {"TSLA": 210.0}, {1: fake_ticker})
+    assert record["strike"] == 200.0
+    assert record["mark"] == 8.0
+    assert record["daysToExpiry"] == 30
 
 
 def test_build_portfolio_response_shape():
@@ -43,6 +163,7 @@ def test_build_portfolio_response_shape():
     assert result["totalNotional"] == 78568.0
     assert "netDelta" in result
     assert result["warnings"] == []
+    assert result["margin"] is None  # no margin block passed
 
 
 def test_build_portfolio_response_icon_url_is_a_servable_web_path():
@@ -90,6 +211,31 @@ def _fake_cfg(leveraged_etf_map=None, dividend_yield=None, risk_free_rate=0.0425
         logo_api_provider="", logo_api_key="",
         _dividend_yield=dividend_yield or {},
     )
+
+
+def test_build_margin_returns_none_without_maint_margin():
+    # A summary missing MaintMarginReq (e.g. cash account) yields no margin block.
+    assert main._build_margin({"NetLiquidation": 100000.0}, 100000.0, _fake_cfg()) is None
+
+
+def test_build_margin_uses_config_thresholds_and_carries_lookahead():
+    account_values = {
+        "NetLiquidation": 100000.0,
+        "MaintMarginReq": 60000.0,
+        "ExcessLiquidity": 8000.0,  # cushion 8% -> below default 10% danger
+        "LookAheadMaintMarginReq": 65000.0,
+        "LookAheadExcessLiquidity": 3000.0,
+        "TotalCashValue": 5000.0,
+        "AvailableFunds": -2000.0,
+    }
+    margin = main._build_margin(account_values, 100000.0, _fake_cfg())
+    assert margin["level"] == "danger"
+    assert margin["excessLiquidity"] == 8000.0
+    assert margin["cushion"] == pytest.approx(0.08)
+    assert margin["lookAheadExcessLiquidity"] == 3000.0
+    assert margin["cash"] == 5000.0
+    assert margin["availableFunds"] == -2000.0
+    assert margin["canOpenNew"] is False  # funding axis, separate from level
 
 
 def test_position_to_record_plain_stock():
