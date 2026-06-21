@@ -125,6 +125,8 @@ def _build_margin(account_values: dict, nlv: float, cfg: config.Config) -> dict 
         excess_liquidity=account_values.get("ExcessLiquidity", 0.0),
         lookahead_maint=account_values.get("LookAheadMaintMarginReq"),
         lookahead_excess=account_values.get("LookAheadExcessLiquidity"),
+        cash=account_values.get("TotalCashValue"),
+        available_funds=account_values.get("AvailableFunds"),
         warning_cushion=cfg.margin_warning_cushion,
         danger_cushion=cfg.margin_danger_cushion,
     )

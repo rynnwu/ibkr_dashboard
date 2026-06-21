@@ -151,3 +151,31 @@ def test_margin_summary_zero_nlv_is_safe_guard():
     result = calc.margin_summary(nlv=0.0, maint_margin=0.0, excess_liquidity=0.0)
     assert result["cushion"] == 0.0
     assert result["level"] == "danger"  # 0 cushion < danger threshold
+
+
+def test_margin_summary_funding_axis_is_separate_from_level():
+    # Liquidation level is driven only by cushion; cash/available_funds are
+    # added as a distinct funding axis and must NOT change the level.
+    result = calc.margin_summary(
+        nlv=100000.0, maint_margin=40000.0, excess_liquidity=50000.0,  # cushion 50% -> safe
+        cash=2000.0, available_funds=-500.0,
+    )
+    assert result["level"] == "safe"  # unaffected by negative available funds
+    assert result["cash"] == 2000.0
+    assert result["availableFunds"] == -500.0
+    assert result["canOpenNew"] is False  # available_funds <= 0
+
+
+def test_margin_summary_can_open_new_true_when_funds_positive():
+    result = calc.margin_summary(
+        nlv=100000.0, maint_margin=40000.0, excess_liquidity=50000.0,
+        cash=10000.0, available_funds=8000.0,
+    )
+    assert result["canOpenNew"] is True
+
+
+def test_margin_summary_omits_funding_fields_when_not_provided():
+    result = calc.margin_summary(nlv=100000.0, maint_margin=40000.0, excess_liquidity=50000.0)
+    assert "cash" not in result
+    assert "availableFunds" not in result
+    assert "canOpenNew" not in result

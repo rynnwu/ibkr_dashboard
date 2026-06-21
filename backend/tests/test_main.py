@@ -122,12 +122,17 @@ def test_build_margin_uses_config_thresholds_and_carries_lookahead():
         "ExcessLiquidity": 8000.0,  # cushion 8% -> below default 10% danger
         "LookAheadMaintMarginReq": 65000.0,
         "LookAheadExcessLiquidity": 3000.0,
+        "TotalCashValue": 5000.0,
+        "AvailableFunds": -2000.0,
     }
     margin = main._build_margin(account_values, 100000.0, _fake_cfg())
     assert margin["level"] == "danger"
     assert margin["excessLiquidity"] == 8000.0
     assert margin["cushion"] == pytest.approx(0.08)
     assert margin["lookAheadExcessLiquidity"] == 3000.0
+    assert margin["cash"] == 5000.0
+    assert margin["availableFunds"] == -2000.0
+    assert margin["canOpenNew"] is False  # funding axis, separate from level
 
 
 def test_position_to_record_plain_stock():

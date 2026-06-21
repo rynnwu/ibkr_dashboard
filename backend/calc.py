@@ -127,6 +127,8 @@ def margin_summary(
     lookahead_maint: float | None = None,
     lookahead_excess: float | None = None,
     *,
+    cash: float | None = None,
+    available_funds: float | None = None,
     warning_cushion: float = 0.20,
     danger_cushion: float = 0.10,
 ) -> dict:
@@ -142,6 +144,14 @@ def margin_summary(
     IBKR's projection after the next known margin change (SPAN updates, options
     nearing expiry) — especially relevant for short options — and is omitted
     from the payload when the gateway doesn't supply it.
+
+    ``cash`` and ``available_funds`` are a *separate* axis from the liquidation
+    ``level``: they answer "can I still open / roll positions?", not "am I about
+    to be force-liquidated?". They deliberately do NOT feed ``level`` (mixing the
+    two would dilute the liquidation signal). ``available_funds`` (= ELV −
+    InitMargin) is always ≤ excess_liquidity, so it hits zero *first* — it's the
+    early warning that a roll/open is no longer possible; ``can_open_new`` flags
+    that. Both are omitted from the payload when not supplied.
 
     Pure: takes plain numbers so it's unit-testable without a live gateway."""
     cushion = excess_liquidity / nlv if nlv else 0.0
@@ -163,6 +173,11 @@ def margin_summary(
         summary["lookAheadMaintMargin"] = lookahead_maint
     if lookahead_excess is not None:
         summary["lookAheadExcessLiquidity"] = lookahead_excess
+    if cash is not None:
+        summary["cash"] = cash
+    if available_funds is not None:
+        summary["availableFunds"] = available_funds
+        summary["canOpenNew"] = available_funds > 0
     return summary
 
 

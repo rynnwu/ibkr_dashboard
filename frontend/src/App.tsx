@@ -226,12 +226,23 @@ export default function App() {
               ...(data.margin.lookAheadExcessLiquidity !== undefined
                 ? [{ label: "LookAhead Excess", value: `$${fmt(data.margin.lookAheadExcessLiquidity)}`, strong: false }]
                 : []),
+              ...(data.margin.cash !== undefined
+                ? [{ label: "Cash 現金", value: `$${fmt(data.margin.cash)}`, strong: false, color: data.margin.cash < 0 ? MARGIN_STYLE.danger.fg : undefined }]
+                : []),
+              ...(data.margin.availableFunds !== undefined
+                ? [{ label: "Avail Funds (可開倉)", value: `$${fmt(data.margin.availableFunds)}`, strong: false, color: data.margin.availableFunds < 0 ? MARGIN_STYLE.danger.fg : undefined }]
+                : []),
             ].map((m) => (
               <div key={m.label} style={{ textAlign: "center" }}>
                 <div style={{ fontSize: fs(16), color: muted, letterSpacing: "0.1em", marginBottom: 4 }}>{m.label}</div>
-                <div style={{ fontSize: "12pt", color: m.strong ? MARGIN_STYLE[data.margin.level].fg : "#0d2438", fontWeight: m.strong ? 700 : 400 }}>{m.value}</div>
+                <div style={{ fontSize: "12pt", color: ("color" in m && m.color) ? m.color : (m.strong ? MARGIN_STYLE[data.margin.level].fg : "#0d2438"), fontWeight: m.strong ? 700 : 400 }}>{m.value}</div>
               </div>
             ))}
+            {data.margin.canOpenNew === false && (
+              <div style={{ background: MARGIN_STYLE.warning.bg, border: `1px solid ${MARGIN_STYLE.warning.border}`, color: MARGIN_STYLE.warning.fg, borderRadius: 3, padding: "4px 10px", fontSize: fs(16), fontWeight: 600, alignSelf: "center" }}>
+                ⚠ 無法開新倉（Available Funds ≤ 0）
+              </div>
+            )}
           </div>
         </div>
       )}

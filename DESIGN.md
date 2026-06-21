@@ -110,10 +110,23 @@ when it hits 0, with no traditional margin-call grace period), `cushion`
 (after the next known margin change — SPAN updates / options nearing expiry,
 especially relevant for short options), and a `level` of `safe`/`warning`/
 `danger` derived from the configurable cushion thresholds
-(`config.json → margin_thresholds`, defaults 0.20/0.10). The frontend renders
-this as a colored card under the header plus a red banner at `danger`. The
-block is `null` when unavailable, so the frontend (and old cached snapshots
-from before this field existed) degrade gracefully.
+(`config.json → margin_thresholds`, defaults 0.20/0.10).
+
+It also carries a **separate funding axis** — `cash` (TotalCashValue),
+`availableFunds` (AvailableFunds = ELV − InitMargin), and `canOpenNew`
+(`availableFunds > 0`). This axis answers "can I still open / roll positions?",
+**not** "am I about to be liquidated?", and deliberately does **not** feed
+`level` (mixing them would dilute the liquidation signal). Because
+`availableFunds ≤ excessLiquidity` always, it hits zero *first*, so
+`canOpenNew == false` is the early warning that a roll/open is no longer
+possible (relevant when closing a short put then funding a long call — the
+debit to buy back the put can exhaust cash before liquidation risk triggers).
+
+The frontend renders this as a colored card under the header (the liquidation
+`level` drives the card color + a red banner at `danger`; `cash`/`availableFunds`
+show as extra cells, red when negative; `canOpenNew == false` shows a separate
+"無法開新倉" badge). The block is `null` when unavailable, so the frontend (and
+old cached snapshots from before this field existed) degrade gracefully.
 
 ### Key formulas (must match `examples/Prompt of notional pie chart.md`)
 

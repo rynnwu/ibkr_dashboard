@@ -70,6 +70,11 @@ ACCOUNT_VALUE_TAGS = (
     "ExcessLiquidity",
     "LookAheadMaintMarginReq",
     "LookAheadExcessLiquidity",
+    # Funding axis (distinct from liquidation risk): can we still open/roll?
+    # AvailableFunds = ELV - InitMargin (always <= ExcessLiquidity, so it goes
+    # to zero first); TotalCashValue is the literal cash balance.
+    "TotalCashValue",
+    "AvailableFunds",
 )
 
 

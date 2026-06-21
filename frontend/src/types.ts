@@ -28,6 +28,11 @@ export interface MarginSummary {
   // IBKR's projection after the next known margin change; optional.
   lookAheadMaintMargin?: number;
   lookAheadExcessLiquidity?: number;
+  // Funding axis (separate from `level`): can we still open/roll positions?
+  // canOpenNew is availableFunds > 0; availableFunds hits 0 before liquidation.
+  cash?: number;
+  availableFunds?: number;
+  canOpenNew?: boolean;
 }
 
 export interface PortfolioResponse {
