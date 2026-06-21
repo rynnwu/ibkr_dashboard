@@ -101,3 +101,53 @@ def test_greeks_card_sums_option_positions_only():
     assert result["net_delta"] == 70.0
     assert result["net_theta"] == 6.0
     assert result["net_vega"] == 1.0
+
+
+def test_margin_summary_levels_and_ratios():
+    # cushion = excess/nlv; buffer = excess/maint
+    safe = calc.margin_summary(nlv=100000.0, maint_margin=40000.0, excess_liquidity=50000.0)
+    assert safe["level"] == "safe"  # cushion 50% >= 20%
+    assert safe["cushion"] == pytest.approx(0.5)
+    assert safe["bufferRatio"] == pytest.approx(50000.0 / 40000.0)
+
+    warning = calc.margin_summary(nlv=100000.0, maint_margin=60000.0, excess_liquidity=15000.0)
+    assert warning["level"] == "warning"  # cushion 15% in [10%, 20%)
+
+    danger = calc.margin_summary(nlv=100000.0, maint_margin=80000.0, excess_liquidity=5000.0)
+    assert danger["level"] == "danger"  # cushion 5% < 10%
+
+
+def test_margin_summary_respects_custom_thresholds():
+    # With a 40% danger threshold, a 30% cushion is danger.
+    result = calc.margin_summary(
+        nlv=100000.0, maint_margin=50000.0, excess_liquidity=30000.0,
+        warning_cushion=0.50, danger_cushion=0.40,
+    )
+    assert result["level"] == "danger"
+
+
+def test_margin_summary_buffer_ratio_none_without_maint_margin():
+    result = calc.margin_summary(nlv=100000.0, maint_margin=0.0, excess_liquidity=100000.0)
+    assert result["bufferRatio"] is None
+    assert result["level"] == "safe"
+
+
+def test_margin_summary_omits_lookahead_when_not_provided():
+    result = calc.margin_summary(nlv=100000.0, maint_margin=40000.0, excess_liquidity=50000.0)
+    assert "lookAheadMaintMargin" not in result
+    assert "lookAheadExcessLiquidity" not in result
+
+
+def test_margin_summary_includes_lookahead_when_provided():
+    result = calc.margin_summary(
+        nlv=100000.0, maint_margin=40000.0, excess_liquidity=50000.0,
+        lookahead_maint=45000.0, lookahead_excess=42000.0,
+    )
+    assert result["lookAheadMaintMargin"] == 45000.0
+    assert result["lookAheadExcessLiquidity"] == 42000.0
+
+
+def test_margin_summary_zero_nlv_is_safe_guard():
+    result = calc.margin_summary(nlv=0.0, maint_margin=0.0, excess_liquidity=0.0)
+    assert result["cushion"] == 0.0
+    assert result["level"] == "danger"  # 0 cushion < danger threshold

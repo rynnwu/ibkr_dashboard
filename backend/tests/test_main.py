@@ -60,6 +60,7 @@ def test_build_portfolio_response_shape():
     assert result["totalNotional"] == 78568.0
     assert "netDelta" in result
     assert result["warnings"] == []
+    assert result["margin"] is None  # no margin block passed
 
 
 def test_build_portfolio_response_icon_url_is_a_servable_web_path():
@@ -107,6 +108,26 @@ def _fake_cfg(leveraged_etf_map=None, dividend_yield=None, risk_free_rate=0.0425
         logo_api_provider="", logo_api_key="",
         _dividend_yield=dividend_yield or {},
     )
+
+
+def test_build_margin_returns_none_without_maint_margin():
+    # A summary missing MaintMarginReq (e.g. cash account) yields no margin block.
+    assert main._build_margin({"NetLiquidation": 100000.0}, 100000.0, _fake_cfg()) is None
+
+
+def test_build_margin_uses_config_thresholds_and_carries_lookahead():
+    account_values = {
+        "NetLiquidation": 100000.0,
+        "MaintMarginReq": 60000.0,
+        "ExcessLiquidity": 8000.0,  # cushion 8% -> below default 10% danger
+        "LookAheadMaintMarginReq": 65000.0,
+        "LookAheadExcessLiquidity": 3000.0,
+    }
+    margin = main._build_margin(account_values, 100000.0, _fake_cfg())
+    assert margin["level"] == "danger"
+    assert margin["excessLiquidity"] == 8000.0
+    assert margin["cushion"] == pytest.approx(0.08)
+    assert margin["lookAheadExcessLiquidity"] == 3000.0
 
 
 def test_position_to_record_plain_stock():

@@ -120,6 +120,52 @@ def portfolio_leverage(total_notional: float, total_exposure: float, nlv: float)
     }
 
 
+def margin_summary(
+    nlv: float,
+    maint_margin: float,
+    excess_liquidity: float,
+    lookahead_maint: float | None = None,
+    lookahead_excess: float | None = None,
+    *,
+    warning_cushion: float = 0.20,
+    danger_cushion: float = 0.10,
+) -> dict:
+    """Margin-buffer snapshot for the dashboard card.
+
+    ``excess_liquidity`` is the dollar buffer to forced liquidation — IBKR
+    starts auto-liquidating when it hits 0 (no traditional margin-call grace
+    period). ``cushion`` = ExcessLiquidity / NLV is the same ratio IBKR
+    reports; it drives the safe/warning/danger level via the configured
+    thresholds. ``buffer_ratio`` = ExcessLiquidity / MaintMarginReq expresses
+    the buffer relative to the *current* requirement (None when there's no
+    maintenance requirement, e.g. a cash-only account). The look-ahead pair is
+    IBKR's projection after the next known margin change (SPAN updates, options
+    nearing expiry) — especially relevant for short options — and is omitted
+    from the payload when the gateway doesn't supply it.
+
+    Pure: takes plain numbers so it's unit-testable without a live gateway."""
+    cushion = excess_liquidity / nlv if nlv else 0.0
+    buffer_ratio = excess_liquidity / maint_margin if maint_margin else None
+    if cushion < danger_cushion:
+        level = "danger"
+    elif cushion < warning_cushion:
+        level = "warning"
+    else:
+        level = "safe"
+    summary = {
+        "maintMargin": maint_margin,
+        "excessLiquidity": excess_liquidity,
+        "cushion": cushion,
+        "bufferRatio": buffer_ratio,
+        "level": level,
+    }
+    if lookahead_maint is not None:
+        summary["lookAheadMaintMargin"] = lookahead_maint
+    if lookahead_excess is not None:
+        summary["lookAheadExcessLiquidity"] = lookahead_excess
+    return summary
+
+
 def greeks_card(option_positions: list[dict]) -> dict[str, float]:
     return {
         "net_delta": sum(p["delta_shares"] for p in option_positions),

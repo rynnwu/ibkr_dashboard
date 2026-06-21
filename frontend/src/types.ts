@@ -17,6 +17,19 @@ export interface PositionRow {
   iv: number | null;
 }
 
+export interface MarginSummary {
+  maintMargin: number;
+  excessLiquidity: number;
+  // ExcessLiquidity / NLV (IBKR's "cushion" ratio); drives the risk level.
+  cushion: number;
+  // ExcessLiquidity / MaintMarginReq; null when there's no maintenance req.
+  bufferRatio: number | null;
+  level: "safe" | "warning" | "danger";
+  // IBKR's projection after the next known margin change; optional.
+  lookAheadMaintMargin?: number;
+  lookAheadExcessLiquidity?: number;
+}
+
 export interface PortfolioResponse {
   nlv: number;
   totalNotional: number;
@@ -28,6 +41,9 @@ export interface PortfolioResponse {
   netVega: number;
   underlyings: UnderlyingRow[];
   positions: PositionRow[];
+  // Margin-buffer snapshot; null when account margin values were unavailable
+  // (cash account, or an older cached snapshot from before this field existed).
+  margin: MarginSummary | null;
   warnings: string[];
   // true when IB Gateway was unreachable and this payload is the last cached
   // snapshot rather than a live fetch. cachedAt is the time the data was

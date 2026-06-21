@@ -16,8 +16,11 @@ CONFIG_PATH = Path(__file__).parent / "config.json"
 logger = logging.getLogger(__name__)
 
 
-def build_portfolio_response(positions: list[dict], nlv: float, icon_lookup: dict, warnings: list[str]) -> dict:
-    """Assembles the full portfolio API payload (totals, leverage, greeks, per-underlying rows) from position records."""
+def build_portfolio_response(positions: list[dict], nlv: float, icon_lookup: dict, warnings: list[str], margin: dict | None = None) -> dict:
+    """Assembles the full portfolio API payload (totals, leverage, greeks, per-underlying rows) from position records.
+
+    ``margin`` is the optional calc.margin_summary() block; None when account
+    margin values were unavailable (it then renders nothing on the frontend)."""
     underlying_rows = calc.aggregate_by_underlying(positions)
     total_notional = sum(row["notional"] for row in underlying_rows)
     total_exposure = sum(row["exposure"] for row in underlying_rows)
@@ -57,6 +60,7 @@ def build_portfolio_response(positions: list[dict], nlv: float, icon_lookup: dic
         "netVega": greeks["net_vega"],
         "underlyings": underlyings,
         "positions": positions,
+        "margin": margin,
         "warnings": warnings,
         "stale": False,
         "cachedAt": cache.now_iso(),
@@ -92,16 +96,38 @@ def _fetch_live_portfolio(cfg: config.Config) -> dict:
     ib = ibkr_client.connect(cfg.ib_gateway_host, cfg.ib_gateway_port, cfg.ib_gateway_client_id)
     try:
         raw_positions, warnings = _collect_positions(ib, cfg)
-        nlv = ibkr_client.fetch_nlv(ib)
+        account_values = ibkr_client.fetch_account_values(ib)
     finally:
         ib.disconnect()
+
+    nlv = account_values.get("NetLiquidation")
+    if nlv is None:
+        raise ValueError("NetLiquidation not found in account summary")
+    margin = _build_margin(account_values, nlv, cfg)
 
     underlyings = {p["underlying"] for p in raw_positions}
     icon_lookup = {
         symbol: icons.get_icon_and_color(symbol, cfg.logo_api_key)
         for symbol in underlyings
     }
-    return build_portfolio_response(raw_positions, nlv, icon_lookup, warnings)
+    return build_portfolio_response(raw_positions, nlv, icon_lookup, warnings, margin)
+
+
+def _build_margin(account_values: dict, nlv: float, cfg: config.Config) -> dict | None:
+    """Builds the margin-buffer block from account-summary values, or None when
+    the gateway didn't report a maintenance-margin figure (e.g. a cash account
+    or a summary that hasn't populated those tags yet)."""
+    if "MaintMarginReq" not in account_values:
+        return None
+    return calc.margin_summary(
+        nlv=nlv,
+        maint_margin=account_values["MaintMarginReq"],
+        excess_liquidity=account_values.get("ExcessLiquidity", 0.0),
+        lookahead_maint=account_values.get("LookAheadMaintMarginReq"),
+        lookahead_excess=account_values.get("LookAheadExcessLiquidity"),
+        warning_cushion=cfg.margin_warning_cushion,
+        danger_cushion=cfg.margin_danger_cushion,
+    )
 
 
 def _collect_positions(ib: IB, cfg: config.Config) -> tuple[list[dict], list[str]]:

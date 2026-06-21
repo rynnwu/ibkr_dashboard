@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import DonutChart from "./components/DonutChart";
 import { fetchPortfolio } from "./api";
-import type { PortfolioResponse, UnderlyingRow, PositionRow } from "./types";
+import type { PortfolioResponse, UnderlyingRow, PositionRow, MarginSummary } from "./types";
 
 const fmt = (n: number, d = 0) => n.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
 
@@ -9,6 +9,14 @@ const fmtCachedAt = (iso: string | null): string => {
   if (!iso) return "未知時間";
   const d = new Date(iso);
   return isNaN(d.getTime()) ? iso : d.toLocaleString("zh-TW", { hour12: false });
+};
+
+// Margin risk-level palette: text/accent + background tint per level, used by
+// the margin-buffer card and the danger banner.
+const MARGIN_STYLE: Record<MarginSummary["level"], { fg: string; bg: string; border: string; label: string }> = {
+  safe: { fg: "#1f7a4d", bg: "#e8f6ee", border: "#bfe3cd", label: "安全" },
+  warning: { fg: "#8a5a00", bg: "#fff4e0", border: "#f0d29a", label: "注意" },
+  danger: { fg: "#b3261e", bg: "#fde8e6", border: "#f3b8b2", label: "危險" },
 };
 
 // Font scaling: the smallest size used in the design was 16 → 10pt.
@@ -194,6 +202,37 @@ export default function App() {
       {data.stale && (
         <div style={{ background: "#fff4e0", borderBottom: "1px solid #f0d29a", color: "#8a5a00", padding: "8px 24px", textAlign: "center", fontSize: fs(18) }}>
           ⚠ 無法連線到 IB Gateway，顯示的是上次成功擷取的快照資料（{fmtCachedAt(data.cachedAt)}）。請確認 Gateway 已啟動並登入，再按「重新整理」。
+        </div>
+      )}
+
+      {data.margin && data.margin.level === "danger" && (
+        <div style={{ background: MARGIN_STYLE.danger.bg, borderBottom: `1px solid ${MARGIN_STYLE.danger.border}`, color: MARGIN_STYLE.danger.fg, padding: "8px 24px", textAlign: "center", fontSize: fs(18), fontWeight: 600 }}>
+          ⚠ 保證金緩衝偏低（Cushion {(data.margin.cushion * 100).toFixed(1)}%）—— 已接近 IBKR 強制平倉門檻。Excess Liquidity 歸零即觸發自動平倉，請儘速補入資金或減倉。
+        </div>
+      )}
+
+      {data.margin && (
+        <div style={{ display: "flex", justifyContent: "center", padding: "14px 24px 0" }}>
+          <div style={{ background: MARGIN_STYLE[data.margin.level].bg, border: `1px solid ${MARGIN_STYLE[data.margin.level].border}`, borderRadius: 4, padding: "10px 24px", display: "flex", flexWrap: "wrap", gap: 36, alignItems: "center" }}>
+            <div style={{ textAlign: "center", paddingRight: 16, borderRight: `1px solid ${MARGIN_STYLE[data.margin.level].border}` }}>
+              <div style={{ fontSize: fs(16), color: muted, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 4 }}>保證金緩衝 Margin</div>
+              <div style={{ fontSize: "13pt", color: MARGIN_STYLE[data.margin.level].fg, fontWeight: 700 }}>{MARGIN_STYLE[data.margin.level].label}</div>
+            </div>
+            {[
+              { label: "Excess Liq (距強平)", value: `$${fmt(data.margin.excessLiquidity)}`, strong: true },
+              { label: "Cushion", value: `${(data.margin.cushion * 100).toFixed(1)}%`, strong: true },
+              { label: "Maint Margin", value: `$${fmt(data.margin.maintMargin)}`, strong: false },
+              { label: "Buffer ×Maint", value: data.margin.bufferRatio !== null ? `${data.margin.bufferRatio.toFixed(2)}×` : "—", strong: false },
+              ...(data.margin.lookAheadExcessLiquidity !== undefined
+                ? [{ label: "LookAhead Excess", value: `$${fmt(data.margin.lookAheadExcessLiquidity)}`, strong: false }]
+                : []),
+            ].map((m) => (
+              <div key={m.label} style={{ textAlign: "center" }}>
+                <div style={{ fontSize: fs(16), color: muted, letterSpacing: "0.1em", marginBottom: 4 }}>{m.label}</div>
+                <div style={{ fontSize: "12pt", color: m.strong ? MARGIN_STYLE[data.margin.level].fg : "#0d2438", fontWeight: m.strong ? 700 : 400 }}>{m.value}</div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

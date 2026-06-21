@@ -56,13 +56,13 @@ is on-demand, not realtime.
 
 | File | Responsibility | Notes |
 |---|---|---|
-| `backend/calc.py` | **Pure math, no I/O.** Notional/exposure/discount, Black-Scholes price/IV/Greeks, aggregation, leverage, Greeks card. | Fully unit-tested. Flat module functions (intentional — no classes). |
-| `backend/config.py` | Load + expose `config.json` as a `Config` dataclass. | `dividend_yield_for(sym)` defaults to 0. |
-| `backend/config.json` | Runtime config (no secrets needed). | leveraged-ETF map, dividend yields, risk-free rate, gateway host/port/clientId, logo API. |
+| `backend/calc.py` | **Pure math, no I/O.** Notional/exposure/discount, Black-Scholes price/IV/Greeks, aggregation, leverage, Greeks card, **margin-buffer summary** (`margin_summary`). | Fully unit-tested. Flat module functions (intentional — no classes). |
+| `backend/config.py` | Load + expose `config.json` as a `Config` dataclass. | `dividend_yield_for(sym)` defaults to 0. `margin_warning_cushion`/`margin_danger_cushion` default to 0.20/0.10. |
+| `backend/config.json` | Runtime config (no secrets needed). | leveraged-ETF map, dividend yields, risk-free rate, gateway host/port/clientId, logo API, `margin_thresholds` (cushion levels for the margin card). |
 | `backend/icons.py` | Per-symbol logo fetch + on-disk cache + dominant-color extraction, with a generated text-icon + hashed-color fallback. | Network call is injectable (`getter=`) so tests never hit the net. Cache: `backend/icon_cache/` (gitignored). |
-| `backend/ibkr_client.py` | **Thin `ib_insync` wrapper. The only module that does IBKR I/O.** connect / positions / NLV / **batched** market data (`fetch_market_data`) / `mark_price`. | Deliberately no automated tests (needs a live gateway). **Never** calls any order/account-modifying method. |
+| `backend/ibkr_client.py` | **Thin `ib_insync` wrapper. The only module that does IBKR I/O.** connect / positions / **account values** (`fetch_account_values`: NLV + margin tags in one `accountSummary` call) / NLV (`fetch_nlv`, now a wrapper) / **batched** market data (`fetch_market_data`) / `mark_price`. | Deliberately no automated tests (needs a live gateway). **Never** calls any order/account-modifying method. |
 | `backend/cache.py` | **On-disk last-good snapshot** of the `/api/portfolio` payload — save / load / `now_iso`. No IBKR I/O, fully unit-tested. | Backs the offline fallback (§10). Cache file: `backend/portfolio_cache.json` (gitignored). |
-| `backend/main.py` | FastAPI app + the wiring: `get_portfolio` route, the pure `build_portfolio_response`, the I/O glue `_collect_positions` (batch-fetches market data), and the **pure** `_position_to_record` (reads from the fetched maps). | Also mounts `/icons` static files (see §5, gotcha G6). |
+| `backend/main.py` | FastAPI app + the wiring: `get_portfolio` route, the pure `build_portfolio_response`, the I/O glue `_collect_positions` (batch-fetches market data), the **pure** `_position_to_record` (reads from the fetched maps), and `_build_margin` (turns account values into the margin block via `calc.margin_summary`). | Also mounts `/icons` static files (see §5, gotcha G6). |
 
 Tests live in `backend/tests/` (`test_calc`, `test_config`, `test_icons`,
 `test_main`) and run with `backend/.venv/bin/pytest backend/tests/`.
@@ -89,10 +89,31 @@ Tests live in `backend/tests/` (`test_calc`, `test_config`, `test_icons`,
    - **Leveraged ETF** (symbol in `leveraged_etf_map`): notional = `|qty| ×
      price × multiplier`, mapped to the underlying, delta = ±multiplier.
    - **Plain stock:** notional = `|qty| × price`, delta = ±1.
-4. `fetch_nlv()` reads NetLiquidation. `ib.disconnect()` runs in a `finally`.
+4. `fetch_account_values()` reads NetLiquidation **and the margin tags**
+   (`MaintMarginReq`, `ExcessLiquidity`, and their `LookAhead*` projections) in
+   one `accountSummary` call. `ib.disconnect()` runs in a `finally`.
+   `_build_margin()` then turns those into the margin block via
+   `calc.margin_summary()` (or `None` when no maintenance-margin figure is
+   reported, e.g. a cash account).
 5. Icons/colors resolved per unique underlying (cached).
 6. `build_portfolio_response()` (pure, unit-tested) aggregates by underlying,
-   computes totals, leverage ratios, and the Greeks card, and shapes the JSON.
+   computes totals, leverage ratios, the Greeks card, **and embeds the margin
+   block**, and shapes the JSON.
+
+### Margin-buffer block (`margin`)
+
+`calc.margin_summary()` is pure risk math over the account values: it reports
+`excessLiquidity` (the dollar buffer to forced liquidation — IBKR auto-liquidates
+when it hits 0, with no traditional margin-call grace period), `cushion`
+(`ExcessLiquidity / NLV`, the same ratio IBKR reports), `bufferRatio`
+(`ExcessLiquidity / MaintMarginReq`), the optional `LookAhead*` projections
+(after the next known margin change — SPAN updates / options nearing expiry,
+especially relevant for short options), and a `level` of `safe`/`warning`/
+`danger` derived from the configurable cushion thresholds
+(`config.json → margin_thresholds`, defaults 0.20/0.10). The frontend renders
+this as a colored card under the header plus a red banner at `danger`. The
+block is `null` when unavailable, so the frontend (and old cached snapshots
+from before this field existed) degrade gracefully.
 
 ### Key formulas (must match `examples/Prompt of notional pie chart.md`)
 
@@ -107,9 +128,10 @@ Tests live in `backend/tests/` (`test_calc`, `test_config`, `test_icons`,
   *positive* delta-equivalent and *positive* (collected) theta.
 
 The response JSON shape is the contract with the frontend; it must stay in
-sync with `frontend/src/types.ts` (`PortfolioResponse`). It carries two
-cache-status fields — `stale` (bool) and `cachedAt` (local-time ISO 8601, or
-null) — see §10.
+sync with `frontend/src/types.ts` (`PortfolioResponse`, `MarginSummary`). It
+carries two cache-status fields — `stale` (bool) and `cachedAt` (local-time
+ISO 8601, or null) — see §10 — and the `margin` block (or `null`) described
+above.
 
 ## 5. Frontend
 
@@ -118,7 +140,8 @@ null) — see §10.
 - `src/components/DonutChart.tsx` — presentational SVG donut; colors come from
   an injected `colorFor` lookup (not a hardcoded table).
 - `src/App.tsx` — the dashboard: loading / error / data states, refresh
-  button, by-underlying ⇄ by-position toggle, Greeks card, legend, two tables.
+  button, by-underlying ⇄ by-position toggle, **margin-buffer card + danger
+  banner** (driven by `margin.level`), Greeks card, legend, two tables.
 - `vite.config.ts` — dev-server proxy `/api → http://127.0.0.1:8000`.
 
 ## 6. Read-only guarantee
