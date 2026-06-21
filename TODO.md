@@ -2,94 +2,36 @@
 
 > 待辦/未來工作清單。先讀 [`DESIGN.md`](DESIGN.md) 了解整體架構,再動工。
 
-## ✅ 換倉資金可行性 + 保證金 what-if 工具(已實作)
+## 換倉資金/保證金 what-if 的後續延伸
 
-> **已完成** — 見 [`DESIGN.md`](DESIGN.md) §11。後端 `calc.roll_what_if` /
-> `regt_short_put_maint` / `exposure_match_sizing`(純函式、有單元測試)+
-> `POST /api/roll-what-if`(無 I/O);前端 `components/RollWhatIf.tsx` 面板。
-> 下方原始設計筆記保留作為公式/限制的參考。
->
-> 未來可延伸:把 `exposure_match_sizing`(曝險匹配 sizing)接進 UI 自動帶入
-> call 口數 / ETF 市值;支援多腿 SP 同時平倉;建模 LookAhead。
+核心功能已實作,見 [`DESIGN.md`](DESIGN.md) §11(後端 `calc.roll_what_if` /
+`regt_short_put_maint` / `call_strike_for_delta` / `exposure_match_sizing` +
+三個無 I/O 端點;前端 `components/RollWhatIf.tsx` 面板)。以下為尚未做的延伸:
 
-**目標**:在 dashboard 上估算「平倉 short put → 改開 long call / 買 2x ETF」
-換倉後的 (a) 保證金緩衝變化、(b) 是否有足夠現金/可動用資金執行換倉。
-這是現有「保證金緩衝監控」功能的延伸,**前置欄位都已備齊**
-(`margin.cash`、`margin.availableFunds`、option ticker marks)。
+### 1. 建模 LookAhead(把換倉效果投影到 look-ahead 軸)
 
-### 背景:已具備的東西
+- 背景:IBKR 帳戶摘要除了當下的 `MaintMarginReq` / `ExcessLiquidity`,還給
+  `LookAheadMaintMarginReq` / `LookAheadExcessLiquidity` —— 對「下一個已知保證金
+  變動時點之後」的預測。兩個驅動:(a) 交易所每日更新的 SPAN 參數,(b) 接近到期的
+  期權(到期/行權/ITM 處理會改變保證金待遇)。對 short option 特別關鍵:快到期的
+  SP,其 current 與 look-ahead margin 可能差很多。
+- 現況:這條軸已顯示在保證金卡(DESIGN §4),但 `roll_what_if` 只算 current 軸
+  (現在的 EL/cushion before→後),**沒有投影到 look-ahead 軸**。
+- 要做:估 `LookAhead EL₁` / cushion / level,回答「換倉後等下一次 SPAN 更新或
+  SP 到期事件之後,緩衝會變怎樣」。
+- 難點/取捨:
+  - 只有整戶的兩個 LookAhead 數字,沒有逐筆 look-ahead 保證金。
+  - 最簡版:假設 ΔEL 對 look-ahead 軸相同 → `LookAhead EL₁ = LookAhead EL₀ + ΣΔEL`
+    (便宜但粗略;與現有 current 軸同公式)。
+  - 較準版:若 look-ahead 變動正是「要平的 SP 接近到期」驅動,平掉它會直接移除該
+    事件 → 不能只線性加減,需要 SP 到期日與 look-ahead 時點的對應關係(目前沒抓)。
+  - 與整個 what-if 的限制一致:non-PM 線性近似;PM 帳戶務必以 TWS What-If 為準。
 
-- 後端 `ibkr_client.ACCOUNT_VALUE_TAGS` 已抓:`NetLiquidation`、`MaintMarginReq`、
-  `ExcessLiquidity`、`LookAhead*`、`TotalCashValue`、`AvailableFunds`。
-- `calc.margin_summary()` 已輸出 `level`(強平軸)與 `cash`/`availableFunds`/
-  `canOpenNew`(銀彈軸)。詳見 DESIGN §4「Margin-buffer block」。
-- SP 的 mark 可由 `_collect_positions` 取得的 `option_ticker_map` 取得。
+### 2. ETF 替代腿的自動 sizing
 
-### 設計(建議)
+- 現況:`calc.exposure_match_sizing` 已可由曝險反算 call 口數(前端「依曝險配對口數」
+  按鈕已接),但 **2x ETF 路徑的 V/股數還沒接 UI**(使用者目前手動輸入 ETF 市值)。
+- 要做:選 ETF 替代腿時,用 `exposure_match_sizing(etf_leverage, etf_price)` 自動帶入
+  曝險匹配的 ETF 市值與股數(需要 ETF 的價格輸入或從持倉/報價取得)。
 
-- **後端**:在 `calc.py` 加**純函式** `roll_what_if(...)`(可單元測試,無 I/O),
-  回傳換倉後估計值。前端加一個輸入面板(要平的 SP、要建的 long call/ETF)。
-- `MM_SP`(該 SP 目前佔的維持保證金)是**最脆弱的輸入**:
-  - 預設用 Reg T 裸 put 近似式(下方),允許使用者**手動覆寫**為 TWS What-If 的實際值。
-
-### 公式(來自本專案的討論;單位:每口 option = 100 股)
-
-定義:
-```
-D       = Σ_SP   put_mark × 100 × |contracts|      # 平倉 SP 借方(下跌時膨脹)
-Premium = Σ_call call_mark × 100 × Q               # 開 long call 權利金
-```
-
-**(1) 保證金緩衝試算**(EL = Excess Liquidity):
-```
-平倉 SP:        ΔEL = +MM_SP            (mark 換倉 NLV 中性,釋放維持保證金)
-開 long call:   ΔEL = −Premium          (long option 無 loan value、不佔保證金)
-買 2x ETF:      ΔEL = −(m × V)          (m=槓桿 ETF 維持率~50%+,V=ETF 市值,現金買)
-
-EL₁ = EL₀ + ΣΔEL
-Cushion₁ = EL₁ / NLV    (NLV 換倉近似不變)
-level₁  = 複用 calc.margin_summary 的門檻判定
-```
-
-**(2) 換倉資金可行性**(long call 不能融資、須全額付):
-```
-Cash₀           = TotalCashValue
-LoanValue_other = Σ(其他可質押證券市值 × (1 − 維持率))   # 不含 long option 本身
-
-Surplus  = Cash₀ + LoanValue_other − D − Premium
-可開倉   ⟺ Surplus ≥ 0
-缺口     = −Surplus
-
-# 純現金/裸 put 帳戶(LoanValue_other = 0)簡化:
-可開倉   ⟺ TotalCashValue ≥ D + Premium
-
-# 等價聚合版(用 IBKR 現成欄位):
-AvailableFunds₁ = AvailableFunds₀ + 釋放的 IM_SP
-可開倉   ⟺ AvailableFunds₁ ≥ Premium
-```
-> 陷阱:下跌時 `D` 膨脹,同時壓低 `AvailableFunds₀`(SP 市值是負債)→ 雙重打擊。
-
-**曝險匹配的 sizing**:
-```
-E_target = |contracts| × 100 × S × |delta_SP|     # 或想要的前瞻曝險
-long call: Q = E_target / (100 × S × delta_call)
-2x ETF:    V = E_target / 2,  shares = V / p
-```
-
-**MM_SP 的 Reg T 裸 put 近似式**(fallback,允許手動覆寫):
-```
-MM_SP ≈ |n| × 100 × [ max( 0.20×S − max(S−K, 0),  0.10×K ) + P_put ]
-```
-
-### 必記限制
-
-- IBKR 實際用 TIMS/SPAN 情境模型(尤其 Portfolio Margin),**整戶非線性、無法逐筆線性拆解**
-  → 本試算是數量級參考,非精確值;PM 帳戶務必以 TWS What-If 為準。
-- long option loan value 假設為 0(Reg T);PM 下不同。
-- 忽略 bid/ask 價差、手續費;未建模 LookAhead。
-
-### 相關討論
-
-「清掉其他正股、改用 long call 維持 exposure 同時釋放現金」也適用同一套公式:
-釋放現金 ≈ `V × (1 − f/d)`(f=權利金/正股比例,d=call delta);
-這是 SP 換倉時現金的來源之一。
+> 已捨棄(deprecated):多腿 SP 同時平倉 —— 不再追蹤。
