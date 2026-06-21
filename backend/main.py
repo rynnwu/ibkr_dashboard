@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from ib_insync import IB, Position
 
-from backend import calc, config, ibkr_client, icons
+from backend import cache, calc, config, ibkr_client, icons
 
 app = FastAPI()
 icons.CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -58,18 +58,38 @@ def build_portfolio_response(positions: list[dict], nlv: float, icon_lookup: dic
         "underlyings": underlyings,
         "positions": positions,
         "warnings": warnings,
+        "stale": False,
+        "cachedAt": cache.now_iso(),
     }
 
 
 @app.get("/api/portfolio")
 def get_portfolio() -> dict:
-    """Connects to IB Gateway and returns the full portfolio response payload."""
+    """Returns the full portfolio payload.
+
+    Happy path: connect to IB Gateway, fetch live, cache the result, return it.
+    If the gateway is unreachable or the fetch fails, fall back to the last
+    cached snapshot (flagged `stale`) so the dashboard still shows something
+    useful; only when there is *no* cache do we surface the 503."""
     cfg = config.load_config(CONFIG_PATH)
     try:
-        ib = ibkr_client.connect(cfg.ib_gateway_host, cfg.ib_gateway_port, cfg.ib_gateway_client_id)
+        payload = _fetch_live_portfolio(cfg)
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"無法連線到 IB Gateway，請確認已啟動並登入: {exc}")
+        logger.warning("Live portfolio fetch failed, attempting cache fallback: %s", exc)
+        cached = cache.load_portfolio()
+        if cached is not None:
+            return cached
+        raise HTTPException(status_code=503, detail=f"無法連線到 IB Gateway，且沒有可用的快照資料: {exc}")
 
+    cache.save_portfolio(payload)
+    return payload
+
+
+def _fetch_live_portfolio(cfg: config.Config) -> dict:
+    """Connects to IB Gateway and builds a fresh portfolio payload. Raises on
+    any connection/fetch failure (the caller decides whether to fall back to
+    the cache)."""
+    ib = ibkr_client.connect(cfg.ib_gateway_host, cfg.ib_gateway_port, cfg.ib_gateway_client_id)
     try:
         raw_positions, warnings = _collect_positions(ib, cfg)
         nlv = ibkr_client.fetch_nlv(ib)

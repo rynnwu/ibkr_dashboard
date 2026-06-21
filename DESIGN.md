@@ -61,6 +61,7 @@ is on-demand, not realtime.
 | `backend/config.json` | Runtime config (no secrets needed). | leveraged-ETF map, dividend yields, risk-free rate, gateway host/port/clientId, logo API. |
 | `backend/icons.py` | Per-symbol logo fetch + on-disk cache + dominant-color extraction, with a generated text-icon + hashed-color fallback. | Network call is injectable (`getter=`) so tests never hit the net. Cache: `backend/icon_cache/` (gitignored). |
 | `backend/ibkr_client.py` | **Thin `ib_insync` wrapper. The only module that does IBKR I/O.** connect / positions / NLV / **batched** market data (`fetch_market_data`) / `mark_price`. | Deliberately no automated tests (needs a live gateway). **Never** calls any order/account-modifying method. |
+| `backend/cache.py` | **On-disk last-good snapshot** of the `/api/portfolio` payload — save / load / `now_iso`. No IBKR I/O, fully unit-tested. | Backs the offline fallback (§10). Cache file: `backend/portfolio_cache.json` (gitignored). |
 | `backend/main.py` | FastAPI app + the wiring: `get_portfolio` route, the pure `build_portfolio_response`, the I/O glue `_collect_positions` (batch-fetches market data), and the **pure** `_position_to_record` (reads from the fetched maps). | Also mounts `/icons` static files (see §5, gotcha G6). |
 
 Tests live in `backend/tests/` (`test_calc`, `test_config`, `test_icons`,
@@ -68,8 +69,10 @@ Tests live in `backend/tests/` (`test_calc`, `test_config`, `test_icons`,
 
 ## 4. Request data flow (`GET /api/portfolio`)
 
-1. `connect()` → fresh `ib_insync.IB` to the gateway. On failure → HTTP **503**
-   with a friendly message (frontend shows an error state + retry).
+1. `connect()` → fresh `ib_insync.IB` to the gateway. On failure (or any error
+   during the fetch) the route falls back to the **last cached snapshot** if one
+   exists (see §10); only when there is *no* cache does it return HTTP **503**
+   with a friendly message (frontend then shows an error state + retry).
 2. `_collect_positions()` reads `ib.positions()`, then makes **one batched**
    `ibkr_client.fetch_market_data()` call for the whole portfolio (all
    underlying prices + all option tickers in a single bounded wait — see §9 and
@@ -104,7 +107,9 @@ Tests live in `backend/tests/` (`test_calc`, `test_config`, `test_icons`,
   *positive* delta-equivalent and *positive* (collected) theta.
 
 The response JSON shape is the contract with the frontend; it must stay in
-sync with `frontend/src/types.ts` (`PortfolioResponse`).
+sync with `frontend/src/types.ts` (`PortfolioResponse`). It carries two
+cache-status fields — `stale` (bool) and `cachedAt` (local-time ISO 8601, or
+null) — see §10.
 
 ## 5. Frontend
 
@@ -235,3 +240,32 @@ cd frontend && npm run dev
 - **One account.** No multi-account handling.
 - **No remote/auth.** Binds to localhost; intended for the user's own machine
   alongside their gateway.
+
+## 10. Offline cache (last-good snapshot)
+
+Goal: when IB Gateway is down (not running, not logged in, mid-restart) the
+dashboard should still show the **most recent successful snapshot** rather than
+only an error screen.
+
+- **Where it lives.** `backend/cache.py` owns it; the file is
+  `backend/portfolio_cache.json` (gitignored). No IBKR I/O, fully unit-tested
+  (`backend/tests/test_cache.py`).
+- **Write path.** On every *successful* live fetch, `get_portfolio` calls
+  `cache.save_portfolio(payload)` with the exact response dict — which already
+  has `stale: false` and `cachedAt: <now>` baked in by
+  `build_portfolio_response`. Writes are best-effort: a cache write failure is
+  logged and swallowed so it can never break a good request.
+- **Read/fallback path.** `get_portfolio` wraps the live fetch
+  (`_fetch_live_portfolio`) in a try/except. On **any** failure (connect *or*
+  fetch) it calls `cache.load_portfolio()`:
+  - cache present → return it with **`stale` forced True** and the original
+    `cachedAt` preserved (so the frontend can say how old it is). HTTP 200.
+  - no/again-unreadable cache → re-raise as the friendly HTTP **503**.
+- **Response contract.** Two extra fields, mirrored in
+  `frontend/src/types.ts`: `stale: boolean`, `cachedAt: string | null`.
+- **Frontend.** When `stale` is true, `App.tsx` renders a yellow banner under
+  the header showing the snapshot time and prompting a refresh; the normal
+  charts/tables still render off the cached payload.
+- **Deliberately no TTL.** A snapshot never "expires"; staleness is surfaced
+  via the banner/`cachedAt` and left to the user to judge. (If a hard cap is
+  ever wanted, that's the single place to add it.)

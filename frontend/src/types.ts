@@ -29,4 +29,9 @@ export interface PortfolioResponse {
   underlyings: UnderlyingRow[];
   positions: PositionRow[];
   warnings: string[];
+  // true when IB Gateway was unreachable and this payload is the last cached
+  // snapshot rather than a live fetch. cachedAt is the time the data was
+  // originally fetched (local-time ISO 8601), used to show how stale it is.
+  stale: boolean;
+  cachedAt: string | null;
 }

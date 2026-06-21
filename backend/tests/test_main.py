@@ -7,15 +7,32 @@ from backend import main
 from backend import config as config_module
 
 
-def test_portfolio_endpoint_returns_503_when_gateway_unreachable(monkeypatch):
+def test_portfolio_endpoint_returns_503_when_gateway_unreachable_and_no_cache(monkeypatch):
     def raise_connect(*a, **k):
         raise ConnectionRefusedError("no gateway")
 
     monkeypatch.setattr(main.ibkr_client, "connect", raise_connect)
+    monkeypatch.setattr(main.cache, "load_portfolio", lambda *a, **k: None)
     client = TestClient(main.app)
     resp = client.get("/api/portfolio")
     assert resp.status_code == 503
     assert "IB Gateway" in resp.json()["detail"]
+
+
+def test_portfolio_endpoint_serves_cached_snapshot_when_gateway_unreachable(monkeypatch):
+    def raise_connect(*a, **k):
+        raise ConnectionRefusedError("no gateway")
+
+    cached_payload = {"nlv": 123.0, "positions": [], "underlyings": [], "warnings": [], "stale": True, "cachedAt": "2026-06-21T08:00:00+08:00"}
+    monkeypatch.setattr(main.ibkr_client, "connect", raise_connect)
+    monkeypatch.setattr(main.cache, "load_portfolio", lambda *a, **k: cached_payload)
+    client = TestClient(main.app)
+    resp = client.get("/api/portfolio")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["stale"] is True
+    assert body["nlv"] == 123.0
+    assert body["cachedAt"] == "2026-06-21T08:00:00+08:00"
 
 
 def test_build_portfolio_response_shape():

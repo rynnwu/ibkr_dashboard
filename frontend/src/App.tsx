@@ -5,6 +5,12 @@ import type { PortfolioResponse, UnderlyingRow, PositionRow } from "./types";
 
 const fmt = (n: number, d = 0) => n.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
 
+const fmtCachedAt = (iso: string | null): string => {
+  if (!iso) return "未知時間";
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? iso : d.toLocaleString("zh-TW", { hour12: false });
+};
+
 // Font scaling: the smallest size used in the design was 16 → 10pt.
 // Every size is scaled by the same ratio so proportions are preserved.
 const FONT_SCALE = 10 / 16;
@@ -184,6 +190,12 @@ export default function App() {
           <button onClick={load} style={{ background: accent, color: "#fff", border: "none", padding: "6px 14px", borderRadius: 4, cursor: "pointer", fontFamily: mono, marginLeft: 16 }}>重新整理</button>
         </div>
       </div>
+
+      {data.stale && (
+        <div style={{ background: "#fff4e0", borderBottom: "1px solid #f0d29a", color: "#8a5a00", padding: "8px 24px", textAlign: "center", fontSize: fs(18) }}>
+          ⚠ 無法連線到 IB Gateway，顯示的是上次成功擷取的快照資料（{fmtCachedAt(data.cachedAt)}）。請確認 Gateway 已啟動並登入，再按「重新整理」。
+        </div>
+      )}
 
       <div style={{ display: "flex", justifyContent: "center", padding: "14px 0 6px", gap: 8 }}>
         {([["byUnd", "依標的"], ["byPos", "依倉位"]] as const).map(([v, l]) => (
