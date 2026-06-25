@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import DonutChart from "./components/DonutChart";
 import RollWhatIf from "./components/RollWhatIf";
+import useIsMobile from "./hooks/useIsMobile";
 import { fetchPortfolio } from "./api";
 import type { PortfolioResponse, UnderlyingRow, PositionRow, MarginSummary } from "./types";
 
@@ -109,6 +110,11 @@ export default function App() {
   const [undSort, setUndSort] = useState<{ key: UndKey; dir: SortDir }>({ key: "notional", dir: "desc" });
   const [posSort, setPosSort] = useState<{ key: PosKey; dir: SortDir }>({ key: "notional", dir: "desc" });
 
+  // Below this, the desktop layout (320px donuts side by side, sidebar legend,
+  // wide metric rows) no longer fits a portrait phone — switch to a stacked layout.
+  const isMobile = useIsMobile();
+  const pad = isMobile ? 12 : 24;
+
   // A portfolio fetch takes ~2 min and opens a gateway connection; guard
   // against overlapping loads (React StrictMode double-invokes this effect,
   // and the user can re-click 重試/refresh) so we don't stack requests.
@@ -131,6 +137,11 @@ export default function App() {
   useEffect(() => { load(); }, [load]);
 
   const bg = "#f5f7fa", card = "#ffffff", border = "#d8e0ea", text = "#1a2a3a", muted = "#5a7a9a", accent = "#2a6fb8", mono = "'JetBrains Mono','Fira Code',monospace";
+
+  // Freezes a table's first column while the rest scrolls horizontally (see
+  // the overflowX:auto wrappers below); background must be opaque to mask
+  // the cells scrolling underneath, and matches the page bg the tables sit on.
+  const stickyCol: React.CSSProperties = { position: "sticky", left: 0, background: bg, zIndex: 1, boxShadow: `1px 0 0 ${border}` };
 
   const colorFor = (und: string) => lightenForLightTheme(data?.underlyings.find((u) => u.symbol === und)?.color ?? "#556699");
 
@@ -180,7 +191,7 @@ export default function App() {
 
   return (
     <div style={{ background: bg, minHeight: "100vh", color: text, fontFamily: mono, fontSize: fs(21), paddingBottom: 40 }}>
-      <div style={{ background: card, borderBottom: `1px solid ${border}`, padding: "14px 24px", display: "flex", flexWrap: "wrap", gap: 16, alignItems: "center", justifyContent: "space-between" }}>
+      <div style={{ background: card, borderBottom: `1px solid ${border}`, padding: `14px ${pad}px`, display: "flex", flexWrap: "wrap", gap: 16, alignItems: "center", justifyContent: "space-between" }}>
         <div>
           <div style={{ fontSize: fs(18), color: muted, letterSpacing: "0.12em", textTransform: "uppercase" }}>Portfolio Risk Dashboard</div>
           <div style={{ fontSize: fs(27), color: "#0d2438", fontWeight: 700, marginTop: 2 }}>Notional &amp; Delta Exposure</div>
@@ -205,20 +216,20 @@ export default function App() {
       </div>
 
       {data.stale && (
-        <div style={{ background: "#fff4e0", borderBottom: "1px solid #f0d29a", color: "#8a5a00", padding: "8px 24px", textAlign: "center", fontSize: fs(18) }}>
+        <div style={{ background: "#fff4e0", borderBottom: "1px solid #f0d29a", color: "#8a5a00", padding: `8px ${pad}px`, textAlign: "center", fontSize: fs(18) }}>
           ⚠ 無法連線到 IB Gateway，顯示的是上次成功擷取的快照資料（{fmtCachedAt(data.cachedAt)}）。請確認 Gateway 已啟動並登入，再按「重新整理」。
         </div>
       )}
 
       {data.margin && data.margin.level === "danger" && (
-        <div style={{ background: MARGIN_STYLE.danger.bg, borderBottom: `1px solid ${MARGIN_STYLE.danger.border}`, color: MARGIN_STYLE.danger.fg, padding: "8px 24px", textAlign: "center", fontSize: fs(18), fontWeight: 600 }}>
+        <div style={{ background: MARGIN_STYLE.danger.bg, borderBottom: `1px solid ${MARGIN_STYLE.danger.border}`, color: MARGIN_STYLE.danger.fg, padding: `8px ${pad}px`, textAlign: "center", fontSize: fs(18), fontWeight: 600 }}>
           ⚠ 保證金緩衝偏低（Cushion {(data.margin.cushion * 100).toFixed(1)}%）—— 已接近 IBKR 強制平倉門檻。Excess Liquidity 歸零即觸發自動平倉，請儘速補入資金或減倉。
         </div>
       )}
 
       {data.margin && (
-        <div style={{ display: "flex", justifyContent: "center", padding: "14px 24px 0" }}>
-          <div style={{ background: MARGIN_STYLE[data.margin.level].bg, border: `1px solid ${MARGIN_STYLE[data.margin.level].border}`, borderRadius: 4, padding: "10px 24px", display: "flex", flexWrap: "wrap", gap: 36, alignItems: "center" }}>
+        <div style={{ display: "flex", justifyContent: "center", padding: `14px ${pad}px 0` }}>
+          <div style={{ background: MARGIN_STYLE[data.margin.level].bg, border: `1px solid ${MARGIN_STYLE[data.margin.level].border}`, borderRadius: 4, padding: `10px ${pad}px`, display: "flex", flexWrap: "wrap", justifyContent: "center", gap: isMobile ? 20 : 36, alignItems: "center" }}>
             <div style={{ textAlign: "center", paddingRight: 16, borderRight: `1px solid ${MARGIN_STYLE[data.margin.level].border}` }}>
               <div style={{ fontSize: fs(16), color: muted, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 4 }}>保證金緩衝 Margin</div>
               <div style={{ fontSize: "13pt", color: MARGIN_STYLE[data.margin.level].fg, fontWeight: 700 }}>{MARGIN_STYLE[data.margin.level].label}</div>
@@ -260,8 +271,8 @@ export default function App() {
         ))}
       </div>
 
-      <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", alignItems: "flex-start", gap: 20, padding: "4px 24px" }}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 5, paddingTop: 36 }}>
+      <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", flexWrap: "wrap", justifyContent: "center", alignItems: isMobile ? "center" : "flex-start", gap: 20, padding: `4px ${pad}px` }}>
+        <div style={{ display: "flex", flexDirection: isMobile ? "row" : "column", flexWrap: "wrap", justifyContent: "center", gap: 5, paddingTop: isMobile ? 0 : 36 }}>
           {legendUnd.map((u) => (
             <div key={u.symbol} onMouseEnter={() => setHoveredUnd(u.symbol)} onMouseLeave={() => setHoveredUnd(null)}
               style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer", background: hoveredUnd === u.symbol ? "#e8eef6" : "transparent", borderRadius: 3, padding: "2px 8px" }}>
@@ -276,8 +287,8 @@ export default function App() {
         <DonutChart data={view === "byUnd" ? undE : posE} total={data.totalExposure} title="曝險 Delta Exposure" subtitle="Δ-Weighted Exp" nlv={data.nlv} colorFor={colorFor} onHover={setHoveredUnd} hoveredUnd={hoveredUnd} />
       </div>
 
-      <div style={{ display: "flex", justifyContent: "center", padding: "14px 24px 6px" }}>
-        <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 4, padding: "10px 32px", display: "flex", gap: 40 }}>
+      <div style={{ display: "flex", justifyContent: "center", padding: `14px ${pad}px 6px` }}>
+        <div style={{ background: card, border: `1px solid ${border}`, borderRadius: 4, padding: isMobile ? "10px 16px" : "10px 32px", display: "flex", flexWrap: "wrap", justifyContent: "center", gap: isMobile ? 20 : 40 }}>
           {[
             { label: "Net Δ (share-eq)", raw: data.netDelta, value: fmt(data.netDelta), color: "#2f7fd0" },
             { label: "Net Θ/day", raw: data.netTheta, value: `${data.netTheta >= 0 ? "+" : ""}$${fmt(data.netTheta, 2)}`, color: "#1f9e7a" },
@@ -297,15 +308,15 @@ export default function App() {
         </div>
       </div>
 
-      <div style={{ padding: "10px 24px 0" }}>
+      <div style={{ padding: `10px ${pad}px 0` }}>
         <div style={{ fontSize: fs(16), color: muted, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 6 }}>標的明細 Underlying Breakdown</div>
         <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: fs(20) }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: fs(20), minWidth: 480 }}>
             <thead>
               <tr style={{ borderBottom: `1px solid ${border}`, color: muted }}>
                 {undCols.map((c) => (
                   <th key={c.key} onClick={() => setUndSort(nextSort(undSort, c.key))}
-                    style={{ padding: "4px 10px", textAlign: c.align, fontWeight: 500, fontSize: fs(20), whiteSpace: "nowrap", cursor: "pointer", userSelect: "none", color: undSort.key === c.key ? accent : muted }}>
+                    style={{ padding: "4px 10px", textAlign: c.align, fontWeight: 500, fontSize: fs(20), whiteSpace: "nowrap", cursor: "pointer", userSelect: "none", color: undSort.key === c.key ? accent : muted, ...(c.key === "symbol" ? stickyCol : {}) }}>
                     {c.label}{arrow(undSort.key === c.key, undSort.dir)}
                   </th>
                 ))}
@@ -316,9 +327,11 @@ export default function App() {
                 const disc = 1 - u.exposure / u.notional;
                 return (
                   <tr key={u.symbol} onMouseEnter={() => setHoveredUnd(u.symbol)} onMouseLeave={() => setHoveredUnd(null)} style={{ borderBottom: "1px solid #eef2f7" }}>
-                    <td style={{ padding: "5px 10px", display: "flex", alignItems: "center", gap: 6 }}>
-                      {u.iconUrl && <img src={u.iconUrl} alt={u.symbol} width={14} height={14} style={{ borderRadius: 2 }} />}
-                      <span style={{ color: "#1a2a3a", fontWeight: 600 }}>{u.symbol}</span>
+                    <td style={{ padding: "5px 10px", ...stickyCol }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        {u.iconUrl && <img src={u.iconUrl} alt={u.symbol} width={14} height={14} style={{ borderRadius: 2 }} />}
+                        <span style={{ color: "#1a2a3a", fontWeight: 600 }}>{u.symbol}</span>
+                      </div>
                     </td>
                     <td style={{ padding: "5px 10px", textAlign: "right", color: "#3a5a7a" }}>${fmt(u.notional)}</td>
                     <td style={{ padding: "5px 10px", textAlign: "right", color: muted }}>{data.totalNotional !== 0 ? ((u.notional / data.totalNotional) * 100).toFixed(1) + "%" : "—"}</td>
@@ -333,7 +346,7 @@ export default function App() {
         </div>
       </div>
 
-      <div style={{ padding: "14px 24px 0" }}>
+      <div style={{ padding: `14px ${pad}px 0` }}>
         <div style={{ fontSize: fs(16), color: muted, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 6 }}>倉位明細 Position Details</div>
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: fs(19), minWidth: 680 }}>
@@ -341,7 +354,7 @@ export default function App() {
               <tr style={{ borderBottom: `1px solid ${border}`, color: muted }}>
                 {posCols.map((c) => (
                   <th key={c.key} onClick={() => setPosSort(nextSort(posSort, c.key))}
-                    style={{ padding: "4px 10px", textAlign: c.align, fontWeight: 500, fontSize: fs(19), whiteSpace: "nowrap", cursor: "pointer", userSelect: "none", color: posSort.key === c.key ? accent : muted }}>
+                    style={{ padding: "4px 10px", textAlign: c.align, fontWeight: 500, fontSize: fs(19), whiteSpace: "nowrap", cursor: "pointer", userSelect: "none", color: posSort.key === c.key ? accent : muted, ...(c.key === "label" ? stickyCol : {}) }}>
                     {c.label}{arrow(posSort.key === c.key, posSort.dir)}
                   </th>
                 ))}
@@ -350,7 +363,7 @@ export default function App() {
             <tbody>
               {sortedPos.map((p, i) => (
                 <tr key={`${p.underlying}-${p.label}-${i}`} onMouseEnter={() => setHoveredUnd(p.underlying)} onMouseLeave={() => setHoveredUnd(null)} style={{ borderBottom: "1px solid #eef2f7" }}>
-                  <td style={{ padding: "4px 10px", color: "#2a4a6a" }}>{p.label}</td>
+                  <td style={{ padding: "4px 10px", color: "#2a4a6a", ...stickyCol }}>{p.label}</td>
                   <td style={{ padding: "4px 10px", fontSize: fs(19) }}>{p.type}</td>
                   <td style={{ padding: "4px 10px", textAlign: "right", color: "#3a5a7a" }}>${fmt(p.notional)}</td>
                   <td style={{ padding: "4px 10px", textAlign: "right", color: "#3a5a7a" }}>${fmt(p.exposure)}</td>
@@ -365,7 +378,7 @@ export default function App() {
       </div>
 
       {data.warnings.length > 0 && (
-        <div style={{ padding: "14px 24px 0", color: "#b8730a", fontSize: fs(18) }}>
+        <div style={{ padding: `14px ${pad}px 0`, color: "#b8730a", fontSize: fs(18) }}>
           {data.warnings.map((w, i) => <div key={i}>⚠ {w}</div>)}
         </div>
       )}

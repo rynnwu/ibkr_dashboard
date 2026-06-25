@@ -42,9 +42,10 @@ export default function DonutChart({ data, total, title, subtitle, nlv, colorFor
   };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", width: "100%", maxWidth: 320 }}>
       <div style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: fs(18), color: "#5a7a9a", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 4 }}>{title}</div>
-      <svg width={320} height={320} style={{ overflow: "visible" }}>
+      {/* viewBox lets the chart (and its text/strokes) scale down together on narrow screens, instead of a fixed 320px box overflowing. */}
+      <svg viewBox="0 0 320 320" style={{ width: "100%", height: "auto", overflow: "visible" }}>
         {slices.map((s, i) => {
           const isH = hoveredUnd === s.und, isO = hoveredUnd && !isH;
           const R = isH ? outerR + 6 : outerR;
