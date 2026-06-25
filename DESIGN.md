@@ -159,6 +159,24 @@ surfaced for the roll what-if SP picker and its model-pricing (§11).
   banner** (driven by `margin.level`), Greeks card, legend, two tables.
 - `vite.config.ts` — dev-server proxy `/api → http://127.0.0.1:8000`.
 
+### Mobile / responsive layout
+
+- `src/hooks/useIsMobile.ts` — `matchMedia("(max-width: 640px)")`, live-updated
+  via the `change` listener. 640px covers portrait phones (~360-430px) while
+  leaving small tablets/desktop windows on the wide layout.
+- `App.tsx` reads `useIsMobile()` and switches layout, not markup: on mobile
+  the two donut charts stack vertically instead of side-by-side, the legend
+  becomes wrappable horizontal tags instead of a side list, and section
+  padding shrinks.
+- `DonutChart.tsx` uses an SVG `viewBox` (not a fixed `width`/`height`) so the
+  chart — including text and stroke width — scales down with its container on
+  narrow screens instead of overflowing a fixed 320px box.
+- The "by underlying" and "by position" detail tables keep their first column
+  (underlying/position) `position: sticky` while scrolling horizontally. The
+  underlying table's frozen cell wraps the icon+text in a flex `div` *inside*
+  the `td` rather than making the `td` itself `display: flex` — the latter
+  broke `sticky` on Safari/WebKit.
+
 ## 6. Read-only guarantee
 
 No code under `backend/` calls any order-placement or account-modifying
