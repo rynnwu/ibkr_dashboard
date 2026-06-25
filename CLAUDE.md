@@ -1,3 +1,7 @@
+# git
+- never commit personal information files.
+- before `git push`, verifed files are without personal, sensitive files.
+
 # add, modify anything
 - read `DESIGN.md` first to understand the whole picture of this program.
 
