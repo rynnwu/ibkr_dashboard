@@ -5,5 +5,6 @@ __pycache__/
 .venv/
 backend/icon_cache/
 backend/portfolio_cache.json
+backend/spx_hedge_cache.json
 .claude/
 logs/

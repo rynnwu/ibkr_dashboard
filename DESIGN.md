@@ -62,7 +62,8 @@ is on-demand, not realtime.
 | `backend/icons.py` | Per-symbol logo fetch + on-disk cache + dominant-color extraction, with a generated text-icon + hashed-color fallback. | Network call is injectable (`getter=`) so tests never hit the net. Cache: `backend/icon_cache/` (gitignored). |
 | `backend/ibkr_client.py` | **Thin `ib_insync` wrapper. The only module that does IBKR I/O.** connect / positions / **account values** (`fetch_account_values`: NLV + margin tags in one `accountSummary` call) / NLV (`fetch_nlv`, now a wrapper) / **batched** market data (`fetch_market_data`) / `mark_price`. | Deliberately no automated tests (needs a live gateway). **Never** calls any order/account-modifying method. |
 | `backend/cache.py` | **On-disk last-good snapshot** of the `/api/portfolio` payload — save / load / `now_iso`. No IBKR I/O, fully unit-tested. | Backs the offline fallback (§10). Cache file: `backend/portfolio_cache.json` (gitignored). |
-| `backend/main.py` | FastAPI app + the wiring: `get_portfolio` route, the pure `build_portfolio_response`, the I/O glue `_collect_positions` (batch-fetches market data), the **pure** `_position_to_record` (reads from the fetched maps), `_build_margin` (turns account values into the margin block via `calc.margin_summary`), and the **`compute_roll_what_if`** / **`price_option`** / **`suggest_call`** POST routes (no IBKR I/O — see §11). | Also mounts `/icons` static files (see §5, gotcha G6). |
+| `backend/spx_cache.py` | **On-disk snapshot of the live SPX market inputs** (level + option-chain + calibrated IV) — save / load. No IBKR I/O, unit-tested. | Populated by the portfolio refresh; backs the I/O-free hedge endpoint (§12). Cache file: `backend/spx_hedge_cache.json` (gitignored). |
+| `backend/main.py` | FastAPI app + the wiring: `get_portfolio` route, the pure `build_portfolio_response`, the I/O glue `_collect_positions` (batch-fetches market data) + `_cache_spx_market` (snapshots SPX chain/IV for §12), the **pure** `_position_to_record` (reads from the fetched maps), `_build_margin` (turns account values into the margin block via `calc.margin_summary`), and the **`compute_roll_what_if`** / **`price_option`** / **`suggest_call`** / **`compute_spx_hedge`** POST routes (all **I/O-free** — §11/§12). | Also mounts `/icons` static files (see §5, gotcha G6). |
 
 Tests live in `backend/tests/` (`test_calc`, `test_config`, `test_icons`,
 `test_main`) and run with `backend/.venv/bin/pytest backend/tests/`.
@@ -378,3 +379,135 @@ the margin-buffer card (§4) — same two axes (liquidation vs. funding), same
   estimate. IBKR uses TIMS/SPAN scenario models (esp. Portfolio Margin —
   whole-account, non-linear, not decomposable per-leg), so a PM account must
   treat TWS What-If as authoritative.
+
+## 12. SPX-put hedge suggestion (大盤避險試算)
+
+Goal: nudge the user, and roughly size, a **market hedge using SPX put options**
+when the portfolio carries a lot of long market exposure. Like the roll what-if
+(§11) it's an **order-of-magnitude guide**, not an order ticket.
+
+### Signed vs. magnitude exposure (the key correctness point)
+
+The donut `exposure` is **magnitude only** (`notional × |delta|`, always
+positive) — it can't be the hedge base, because longs and shorts must net. The
+hedge is sized against **signed net dollar-delta** (net *long* market exposure),
+then **beta-weighted to SPX**:
+
+- `calc.signed_dollar_delta(position)` — per-position signed $-delta. Option:
+  `quantity × 100 × delta × underlying_price` (both `quantity` and `delta` carry
+  sign — a short put is +, a long put is −). Stock/leveraged-ETF:
+  `sign(quantity) × notional` (the ETF multiplier is already folded into
+  `notional`). Returns 0 for an option missing delta/price (degrades safely).
+- `calc.beta_weighted_exposure(positions, betas)` — sums signed $-delta **by
+  underlying**, multiplies each by its beta vs SPX (missing → `default_beta` =
+  1.0), and returns `netBetaWeightedExposure` + a per-underlying breakdown +
+  the list of symbols that `defaulted` to 1.0.
+
+`build_portfolio_response` embeds `netBetaWeightedExposure`,
+`betaWeightedLeverage` (= net / NLV), `spxLevel`, `spxHedgeWarningLeverage`, and
+per-underlying `beta` into the `/api/portfolio` payload, so the banner renders
+immediately.
+
+### Beta source
+
+Per-underlying beta vs the S&P 500 comes from IBKR **fundamental ratios (generic
+tick `258`)** — `ibkr_client.fetch_betas()` (a *streaming*, non-snapshot request
+because the ratios tick isn't delivered on plain snapshots; same bounded/polled
+wait + cancel as `fetch_market_data`, kept separate so the proven price path is
+untouched). `main._resolve_betas()` then applies precedence: **config
+`beta_overrides` → IBKR fundamental beta → 1.0 default** (defaulted symbols are
+surfaced as a `warnings[]` note). Risk: tick 258 needs Reuters-fundamentals
+entitlement and may be missing for indices/ETFs — the override + 1.0 fallback
+keep the feature working regardless. A beta- or SPX-fetch failure is caught and
+degrades (betas → 1.0, `spxLevel` → 0) without sinking the portfolio fetch.
+
+### Sizing: target-leverage vs fraction
+
+- `calc.put_strike_for_delta(...)` — put analog of `call_strike_for_delta`
+  (inverse of `delta = −e^{-qT}·N(−d1)`), used to pick a strike near the target
+  put delta before snapping to a listed strike.
+- `calc.spx_put_hedge(...)` sizes the **long protective put** in one of two modes:
+  - **target-leverage** (`target_leverage` set — the **default driver**): the
+    *minimum* whole contracts to bring post-hedge leverage at/under the target,
+    `contracts = ceil((net_exposure − target·nlv) / (spx·100·|put_delta|))`
+    (0 when exposure is already under target). This is what makes the default
+    suggestion "the cheapest hedge that gets leverage < 1.0×".
+  - **fraction** (`target_leverage is None`): `raw = hedge_fraction · net /
+    (spx·100·|put_delta|)`, `contracts = round(raw)`.
+  In both modes the reported `netExposureAfter` is the **actual residual** from
+  the rounded count — `net_exposure − contracts·100·spx·|put_delta|` — *not* a
+  tautological `net·(1−fraction)`. It can go slightly negative when rounding
+  over-hedges. Delta-equivalent at the current spot (a long put protects the
+  downside while keeping upside — not a symmetric cancellation).
+
+### Three proposals (one shared contract count N)
+
+`calc.spx_hedge_proposals(...)` builds **three strategies that share one N** — the
+long-put count from `spx_put_hedge` above (so N is sized to the leverage target).
+All legs are Black-Scholes priced off **one flat IV** (`_bs_leg`), so per-leg
+premiums and the net cost across legs are coherent; strikes snap to the live chain
+(or a `_synthetic_strikes` 5-pt grid in the model fallback):
+
+1. **long_put** — buy N puts at `target_put_delta`. Full downside; most expensive.
+2. **vertical** — bear put spread: +N puts (`target_put_delta`) / −N puts
+   (`floor_put_delta`, strictly lower strike). Cheaper debit; protection capped.
+3. **seagull** — +N put / −N put (as the vertical) / −N call, the **call strike
+   chosen so its credit ≈ the put-spread debit** (≈ **zero-cost**); caps upside.
+
+Each proposal reports its own `cost` (+debit/−credit), legs, `protectionFloor`
+(short-put strike), `upsideCap` (short-call strike), `maxProtection`, and its
+**real** residual exposure/leverage = `net_exposure + Σ leg dollar-delta`. Because
+N is sized off the *long put*, only the leg-mixes that net enough negative delta
+actually reach the target: the long put does, the seagull over-hedges (short call
+adds more negative delta), the vertical typically lands *above* target (the short
+put gives back delta) — surfaced honestly in the UI, not hidden.
+
+### SPX market cache (no per-request IBKR I/O)
+
+**`POST /api/spx-hedge`** (`compute_spx_hedge`) is now **I/O-free** like the §11
+what-if endpoints. The live SPX inputs come from a cache populated by the
+*portfolio* refresh, not a fresh connection per hedge what-if:
+
+- `main._cache_spx_market(ib, cfg)` runs inside `_fetch_live_portfolio` (which
+  already holds a connection): it fetches the SPX index level + option-chain
+  params, **calibrates IV** by implying it from a near-target live put quote
+  (`fetch_option_quote`, greeks tick `106`) when an options feed exists (else the
+  config assumed IV), and writes `{spxLevel, expirations, strikes, iv, source,
+  cachedAt}` to **`backend/spx_cache.py`** (file `backend/spx_hedge_cache.json`,
+  gitignored, fully best-effort — a failure leaves the prior cache intact).
+- `compute_spx_hedge` → `_resolve_spx_market` **loads that cache** (re-picking the
+  expiry for the requested `target_dte` cap from the cached chain) and calls
+  `spx_hedge_proposals`. So tweaking DTE / delta / strategy recomputes instantly
+  from the snapshot with no reconnect. With no snapshot this session it degrades
+  to model pricing off the client-supplied `spxLevel` (`source: "live" | "model"`,
+  plus `cachedAt`); only when there's neither does it 503.
+- `_pick_expiry` treats `target_dte` as an **upper cap**: the longest-dated expiry
+  ≤ the cap (so `target_dte = 30` → DTE ≤ 30), falling back to the nearest when
+  every listed expiry is beyond the cap.
+
+### Config + frontend
+
+- `config.json → spx_hedge`: `target_put_delta` (0.30), `floor_put_delta` (0.12,
+  the short/lower put leg), `target_dte` (**30**, a DTE *cap*), `assumed_iv`
+  (0.20), `hedge_fraction` (1.0), `target_leverage` (**1.0**, the default sizing
+  goal), `spx_dividend_yield` (0.013), `warning_leverage` (1.5); plus a
+  `beta_overrides` map. Exposed on `Config` with a `beta_for(symbol)` helper.
+- `App.tsx` shows a blue **hedge-suggestion banner** under the margin card when
+  `betaWeightedLeverage > spxHedgeWarningLeverage` (and net exposure > 0), and
+  renders `components/SpxHedge.tsx` — a collapsible panel (sibling to
+  `RollWhatIf`) with target-leverage / put-delta / floor-delta / DTE / assumed-IV
+  inputs. It **auto-runs the default suggestion on first open** and renders the
+  **three proposal cards**: per-leg `買/賣 N 口 SPX <strike><P/C> (<% vs spot>)`,
+  net cost (credit highlighted), post-hedge leverage **colored against the
+  target** (green = met, red = misses, orange = over-hedged), protection floor /
+  upside cap (each with % vs current SPX), and the snapshot source/time. The
+  response is `{contracts, targetLeverage, spxLevel, dte, iv, longPutStrike,
+  floorPutStrike, proposals[], source, cachedAt, …}` — mirrored in
+  `frontend/src/types.ts` (`SpxHedgeResult`, `HedgeProposal`, `HedgeLeg`).
+
+### Hard limits (in-UI caveat)
+
+Order-of-magnitude only: it treats the whole signed beta-weighted exposure as
+SPX-correlated (ignores skew, cross-correlation drift, and basis), and beta is a
+trailing single-number proxy. Real hedge selection still depends on the user's
+strike/expiry judgement.

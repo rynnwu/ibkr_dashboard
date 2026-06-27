@@ -295,3 +295,166 @@ def test_margin_summary_omits_funding_fields_when_not_provided():
     assert "cash" not in result
     assert "availableFunds" not in result
     assert "canOpenNew" not in result
+
+
+# ─── SPX-put hedge ──────────────────────────────────────────────────────────
+
+def test_signed_dollar_delta_long_stock_is_positive():
+    pos = {"type": "STK", "quantity": 100, "notional": 20000.0}
+    assert calc.signed_dollar_delta(pos) == pytest.approx(20000.0)
+
+
+def test_signed_dollar_delta_short_stock_is_negative():
+    pos = {"type": "STK", "quantity": -100, "notional": 20000.0}
+    assert calc.signed_dollar_delta(pos) == pytest.approx(-20000.0)
+
+
+def test_signed_dollar_delta_short_put_is_positive_bullish():
+    # quantity -2 (short) * 100 * delta -0.4 * S 200 = +16000 (bullish exposure)
+    pos = {"type": "POPT", "quantity": -2, "delta": -0.4, "underlying_price": 200.0, "notional": 0.0}
+    assert calc.signed_dollar_delta(pos) == pytest.approx(16000.0)
+
+
+def test_signed_dollar_delta_long_put_is_negative():
+    pos = {"type": "POPT", "quantity": 2, "delta": -0.4, "underlying_price": 200.0, "notional": 0.0}
+    assert calc.signed_dollar_delta(pos) == pytest.approx(-16000.0)
+
+
+def test_signed_dollar_delta_option_missing_price_is_zero():
+    pos = {"type": "COPT", "quantity": 1, "delta": 0.5}
+    assert calc.signed_dollar_delta(pos) == 0.0
+
+
+def test_beta_weighted_exposure_nets_and_weights():
+    positions = [
+        {"type": "STK", "underlying": "NVDA", "quantity": 100, "notional": 50000.0},   # +50000
+        {"type": "STK", "underlying": "SPY", "quantity": -100, "notional": 40000.0},    # -40000
+    ]
+    betas = {"NVDA": 2.0, "SPY": 1.0}
+    out = calc.beta_weighted_exposure(positions, betas)
+    # 50000*2 + (-40000*1) = 60000
+    assert out["netBetaWeightedExposure"] == pytest.approx(60000.0)
+    assert out["defaulted"] == []
+
+
+def test_beta_weighted_exposure_defaults_missing_beta_to_one():
+    positions = [{"type": "STK", "underlying": "FOO", "quantity": 10, "notional": 1000.0}]
+    out = calc.beta_weighted_exposure(positions, {})
+    assert out["netBetaWeightedExposure"] == pytest.approx(1000.0)
+    assert out["defaulted"] == ["FOO"]
+
+
+def test_put_strike_for_delta_round_trips_through_bs_greeks():
+    S, T, r, q, sigma = 5000.0, 90 / 365.0, 0.0425, 0.013, 0.20
+    K = calc.put_strike_for_delta(S, 0.30, T, r, q, sigma)
+    delta = calc.bs_greeks(S, K, T, r, q, sigma, "P")["delta"]
+    assert abs(delta) == pytest.approx(0.30, abs=0.01)
+    assert K < S  # a 0.30-delta put is OTM (strike below spot)
+
+
+def test_spx_put_hedge_rounds_to_whole_contracts_and_reports_real_residual():
+    out = calc.spx_put_hedge(
+        net_exposure=1_000_000.0, spx_level=5000.0, put_delta=-0.30,
+        put_price=80.0, hedge_fraction=1.0, nlv=500_000.0,
+    )
+    # raw = 1,000,000 / (5000 * 100 * 0.30) = 6.666... -> rounds to 7 contracts
+    assert out["rawContracts"] == pytest.approx(6.6667, abs=1e-3)
+    assert out["contracts"] == 7.0
+    # actual offset from 7 whole contracts and the resulting (signed) residual
+    assert out["deltaOffset"] == pytest.approx(7 * 100 * 5000 * 0.30)  # 1,050,000
+    assert out["netExposureAfter"] == pytest.approx(1_000_000.0 - 1_050_000.0)  # -50,000 (slightly over-hedged)
+    assert out["cost"] == pytest.approx(7 * 100 * 80.0)
+    assert out["leverageBefore"] == pytest.approx(2.0)
+    assert out["leverageAfter"] == pytest.approx(-50_000.0 / 500_000.0)
+
+
+def test_spx_put_hedge_partial_fraction_leaves_positive_residual():
+    out = calc.spx_put_hedge(
+        net_exposure=1_000_000.0, spx_level=5000.0, put_delta=-0.30,
+        put_price=80.0, hedge_fraction=0.5, nlv=500_000.0,
+    )
+    # raw = 3.333 -> rounds to 3; offset = 3*100*5000*0.30 = 450,000
+    assert out["contracts"] == 3.0
+    assert out["netExposureAfter"] == pytest.approx(550_000.0)
+    assert out["leverageAfter"] == pytest.approx(1.1)
+
+
+def test_spx_put_hedge_target_leverage_sizes_minimum_to_get_under_target():
+    # net/nlv = 2.0x; target 1.0x. required_offset = 1,000,000 - 1.0*500,000 = 500,000;
+    # denom = 5000*100*0.30 = 150,000; raw = 3.33 -> ceil = 4 contracts (minimum to
+    # bring residual <= target*nlv).
+    out = calc.spx_put_hedge(
+        net_exposure=1_000_000.0, spx_level=5000.0, put_delta=-0.30,
+        put_price=80.0, hedge_fraction=1.0, nlv=500_000.0, target_leverage=1.0,
+    )
+    assert out["contracts"] == 4.0
+    assert out["targetLeverage"] == 1.0
+    # 4 contracts -> offset 600,000 -> residual 400,000 -> leverage 0.8x (< 1.0x)
+    assert out["netExposureAfter"] == pytest.approx(400_000.0)
+    assert out["leverageAfter"] == pytest.approx(0.8)
+    assert out["leverageAfter"] < 1.0
+
+
+def test_spx_put_hedge_target_leverage_zero_when_already_under_target():
+    # exposure already 0.8x < 1.0x target -> no hedge needed.
+    out = calc.spx_put_hedge(
+        net_exposure=400_000.0, spx_level=5000.0, put_delta=-0.30,
+        put_price=80.0, hedge_fraction=1.0, nlv=500_000.0, target_leverage=1.0,
+    )
+    assert out["contracts"] == 0.0
+    assert out["cost"] == 0.0
+    assert out["netExposureAfter"] == pytest.approx(400_000.0)
+
+
+def test_spx_hedge_proposals_three_strategies_share_n_and_rank_by_cost():
+    out = calc.spx_hedge_proposals(
+        net_exposure=1_000_000.0, nlv=500_000.0, spx_level=5000.0, dte=30,
+        r=0.0425, q=0.013, sigma=0.20, target_put_delta=0.30, floor_put_delta=0.12,
+        hedge_fraction=1.0, target_leverage=1.0,
+    )
+    kinds = [p["kind"] for p in out["proposals"]]
+    assert kinds == ["long_put", "vertical", "seagull"]
+    by_kind = {p["kind"]: p for p in out["proposals"]}
+
+    # all three share the long-put contract count, sized to leverage < target
+    n = out["contracts"]
+    assert n > 0
+    assert all(p["contracts"] == n for p in out["proposals"])
+    assert by_kind["long_put"]["leverageAfter"] < 1.0
+
+    # cost ranking: vertical (debit spread) < long put; seagull (adds call credit) cheapest
+    assert by_kind["vertical"]["cost"] < by_kind["long_put"]["cost"]
+    assert abs(by_kind["seagull"]["cost"]) < by_kind["vertical"]["cost"]
+
+    # leg structure
+    assert [l["right"] for l in by_kind["long_put"]["legs"]] == ["P"]
+    vert_legs = by_kind["vertical"]["legs"]
+    assert vert_legs[0]["contracts"] == n and vert_legs[1]["contracts"] == -n
+    assert vert_legs[1]["strike"] < vert_legs[0]["strike"]  # floor strictly below long
+    sea = by_kind["seagull"]
+    assert [(l["right"], l["contracts"]) for l in sea["legs"]] == [("P", n), ("P", -n), ("C", -n)]
+    assert sea["upsideCap"] > out["spxLevel"]
+    assert sea["protectionFloor"] == out["floorPutStrike"]
+
+
+def test_spx_hedge_proposals_zero_contracts_when_under_target():
+    out = calc.spx_hedge_proposals(
+        net_exposure=400_000.0, nlv=500_000.0, spx_level=5000.0, dte=30,
+        r=0.0425, q=0.013, sigma=0.20, target_put_delta=0.30, floor_put_delta=0.12,
+        hedge_fraction=1.0, target_leverage=1.0,
+    )
+    assert out["contracts"] == 0
+    assert all(p["cost"] == 0.0 for p in out["proposals"])
+    assert all(p["netExposureAfter"] == pytest.approx(400_000.0) for p in out["proposals"])
+
+
+def test_spx_put_hedge_residual_not_tautological_at_full_fraction():
+    # Regression: a whole-contract hedge must NOT report exactly $0 residual at
+    # hedge_fraction=1 (the old net*(1-fraction) bug).
+    out = calc.spx_put_hedge(
+        net_exposure=771_745.0, spx_level=5000.0, put_delta=-0.30,
+        put_price=80.0, hedge_fraction=1.0, nlv=378_000.0,
+    )
+    assert out["contracts"] == 5.0  # round(771745/150000 = 5.14)
+    assert out["netExposureAfter"] != 0.0
+    assert out["netExposureAfter"] == pytest.approx(771_745.0 - 5 * 150_000.0)  # 21,745

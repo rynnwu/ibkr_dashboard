@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import DonutChart from "./components/DonutChart";
 import RollWhatIf from "./components/RollWhatIf";
+import SpxHedge from "./components/SpxHedge";
 import useIsMobile from "./hooks/useIsMobile";
 import { fetchPortfolio } from "./api";
 import type { PortfolioResponse, UnderlyingRow, PositionRow, MarginSummary } from "./types";
@@ -227,6 +228,12 @@ export default function App() {
         </div>
       )}
 
+      {data.betaWeightedLeverage > data.spxHedgeWarningLeverage && data.netBetaWeightedExposure > 0 && (
+        <div style={{ background: "#eaf2fb", borderBottom: "1px solid #b9d4f0", color: "#1d4e87", padding: `8px ${pad}px`, textAlign: "center", fontSize: fs(18), fontWeight: 600 }}>
+          🛡 Beta 加權淨曝險 {data.betaWeightedLeverage.toFixed(2)}× NLV(${fmt(data.netBetaWeightedExposure)})—— 可考慮買進 SPX 賣權 (put) 進行大盤避險。展開下方「SPX 避險試算」估算口數與成本。
+        </div>
+      )}
+
       {data.margin && (
         <div style={{ display: "flex", justifyContent: "center", padding: `14px ${pad}px 0` }}>
           <div style={{ background: MARGIN_STYLE[data.margin.level].bg, border: `1px solid ${MARGIN_STYLE[data.margin.level].border}`, borderRadius: 4, padding: `10px ${pad}px`, display: "flex", flexWrap: "wrap", justifyContent: "center", gap: isMobile ? 20 : 36, alignItems: "center" }}>
@@ -264,6 +271,7 @@ export default function App() {
       )}
 
       <RollWhatIf data={data} />
+      <SpxHedge data={data} />
 
       <div style={{ display: "flex", justifyContent: "center", padding: "14px 0 6px", gap: 8 }}>
         {([["byUnd", "依標的"], ["byPos", "依倉位"]] as const).map(([v, l]) => (

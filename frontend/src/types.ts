@@ -4,6 +4,8 @@ export interface UnderlyingRow {
   exposure: number;
   color: string;
   iconUrl: string | null;
+  // Beta vs SPX used for the hedge calc; null when defaulted to 1.0.
+  beta?: number | null;
 }
 
 export interface PositionRow {
@@ -51,6 +53,13 @@ export interface PortfolioResponse {
   netDelta: number;
   netTheta: number;
   netVega: number;
+  // Net signed beta-weighted dollar exposure (the SPX-equivalent $ to hedge) and
+  // its leverage vs NLV; SPX index level. See DESIGN §12.
+  netBetaWeightedExposure: number;
+  betaWeightedLeverage: number;
+  spxLevel: number;
+  // Beta-weighted leverage above which the hedge-suggestion banner shows.
+  spxHedgeWarningLeverage: number;
   underlyings: UnderlyingRow[];
   positions: PositionRow[];
   // Margin-buffer snapshot; null when account margin values were unavailable
@@ -144,4 +153,58 @@ export interface SuggestCallResult {
   targetDelta: number;
   mark: number;
   delta: number;
+}
+
+// ─── SPX-put hedge (POST /api/spx-hedge) ────────────────────────────────────
+export interface SpxHedgeRequest {
+  netExposure: number;
+  nlv: number;
+  hedgeFraction?: number;
+  targetLeverage?: number; // size the minimum hedge to get post-hedge leverage under this
+  targetDelta?: number;
+  floorDelta?: number; // lower (short) put leg for vertical/seagull
+  targetDte?: number; // treated as an upper cap on the chosen expiry's DTE
+  assumedIv?: number; // percent
+  spxLevel?: number; // fallback if no live SPX cache this session
+}
+
+export interface HedgeLeg {
+  right: "P" | "C";
+  strike: number;
+  contracts: number; // signed: long +, short −
+  price: number; // per-share premium
+  delta: number; // per-share BS delta
+  cost: number; // whole-position cost: +debit / −credit
+}
+
+export interface HedgeProposal {
+  kind: "long_put" | "vertical" | "seagull";
+  contracts: number; // shared N
+  legs: HedgeLeg[];
+  cost: number; // net cost: +debit / −credit (≈0 for seagull)
+  deltaOffset: number;
+  netExposureBefore: number;
+  netExposureAfter: number;
+  leverageBefore: number;
+  leverageAfter: number;
+  protectionFloor: number | null; // short-put strike (vertical/seagull); null for long put
+  upsideCap: number | null; // short-call strike (seagull); else null
+  maxProtection: number | null; // capped payoff between long & floor strikes
+}
+
+export interface SpxHedgeResult {
+  contracts: number; // whole tradeable contracts shared across proposals
+  targetLeverage: number | null; // null when sized by fraction instead of target leverage
+  netExposureBefore: number;
+  leverageBefore: number;
+  spxLevel: number;
+  dte: number;
+  iv: number;
+  longPutStrike: number;
+  floorPutStrike: number;
+  proposals: HedgeProposal[];
+  source: "live" | "model";
+  cachedAt: string | null; // when the SPX market snapshot was taken
+  targetDelta: number;
+  floorPutDelta: number;
 }

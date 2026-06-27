@@ -327,6 +327,276 @@ def exposure_match_sizing(
     return result
 
 
+def signed_dollar_delta(position: dict, contract_size: float = 100) -> float:
+    """Signed market exposure of one position in *dollars of underlying delta*.
+
+    Unlike the donut ``exposure`` (which is ``notional × |delta|``, always
+    positive), this carries direction — long market exposure is positive, short
+    is negative — so net long/short cancels correctly when summed. This is the
+    correct base for a market hedge.
+
+      - option: ``quantity × 100 × delta × underlying_price`` — both ``quantity``
+        (long/short) and ``delta`` (right) carry sign, so a short put is +, a
+        long put is −.
+      - stock / leveraged ETF: ``sign(quantity) × notional`` (the ``notional``
+        already folds in the ETF multiplier; ``delta`` already encodes the sign).
+
+    Pure."""
+    if position["type"] in ("COPT", "POPT"):
+        delta = position.get("delta")
+        underlying_price = position.get("underlying_price")
+        if delta is None or underlying_price is None:
+            return 0.0
+        return position["quantity"] * contract_size * delta * underlying_price
+    sign = 1.0 if position["quantity"] >= 0 else -1.0
+    return sign * position["notional"]
+
+
+def beta_weighted_exposure(positions: list[dict], betas: dict[str, float], default_beta: float = 1.0) -> dict:
+    """Net signed dollar-delta beta-weighted to the S&P 500, plus a per-underlying
+    breakdown. ``betas`` maps an underlying symbol to its beta vs SPX; missing
+    symbols use ``default_beta``. Pure.
+
+    Returns ``{netBetaWeightedExposure, breakdown: [{underlying, signedDelta,
+    beta, betaWeighted}], defaulted: [symbols that used default_beta]}``."""
+    by_underlying: dict[str, float] = {}
+    for pos in positions:
+        by_underlying[pos["underlying"]] = by_underlying.get(pos["underlying"], 0.0) + signed_dollar_delta(pos)
+
+    breakdown = []
+    defaulted: list[str] = []
+    net = 0.0
+    for underlying, signed in by_underlying.items():
+        if underlying in betas:
+            beta = betas[underlying]
+        else:
+            beta = default_beta
+            defaulted.append(underlying)
+        weighted = signed * beta
+        net += weighted
+        breakdown.append({"underlying": underlying, "signedDelta": signed, "beta": beta, "betaWeighted": weighted})
+
+    return {"netBetaWeightedExposure": net, "breakdown": breakdown, "defaulted": defaulted}
+
+
+def put_strike_for_delta(
+    S: float, target_delta: float, T: float, r: float, q: float, sigma: float
+) -> float:
+    """Strike whose Black-Scholes *put* delta has magnitude ``target_delta`` — the
+    closed-form inverse of ``delta = −e^{-qT}·N(−d1)``:
+
+        N(−d1) = target_delta · e^{qT}   ⇒   d1 = −Φ⁻¹(target_delta · e^{qT})
+        ln(K) = ln(S) + (r − q + σ²/2)·T − d1·σ·√T
+
+    ``target_delta`` is the magnitude (a positive number in (0,1)). Higher
+    magnitude ⇒ deeper ITM ⇒ higher strike. Used to pick a hedge-put strike near
+    a target delta before snapping to a listed strike. Pure."""
+    td = min(max(abs(target_delta), 1e-6), 1.0 - 1e-6)
+    n_neg_d1 = min(max(td * math.exp(q * T), 1e-6), 1.0 - 1e-6)
+    d1 = -norm.ppf(n_neg_d1)
+    ln_k = math.log(S) + (r - q + 0.5 * sigma ** 2) * T - d1 * sigma * math.sqrt(T)
+    return math.exp(ln_k)
+
+
+def spx_put_hedge(
+    *,
+    net_exposure: float,
+    spx_level: float,
+    put_delta: float,
+    put_price: float,
+    hedge_fraction: float,
+    nlv: float,
+    target_leverage: float | None = None,
+    contract_size: float = 100,
+) -> dict:
+    """Size an SPX-put hedge against the portfolio's net beta-weighted dollar
+    exposure. Pure — an order-of-magnitude guide, not an order ticket.
+
+    Two sizing modes:
+
+    - **target-leverage** (``target_leverage`` set, the default driver): the
+      *minimum* whole contracts that bring post-hedge leverage at/under
+      ``target_leverage`` (e.g. 1.0× NLV). Solving ``residual ≤ target·nlv``:
+
+          residual  = net_exposure − contracts·100·spx·|put_delta| ≤ target·nlv
+          contracts = ceil( (net_exposure − target·nlv) / (spx·100·|put_delta|) )
+
+      (0 contracts when exposure is already at/under the target.)
+    - **fraction** (``target_leverage is None``): hedge a fraction of exposure:
+
+          raw       = hedge_fraction · net_exposure / (spx_level · 100 · |put_delta|)
+          contracts = round(raw)                       # options trade whole
+
+    In both modes the reported figures come from the *rounded* contract count:
+
+        offset    = contracts · 100 · spx_level · |put_delta|   # actual Δ-$ removed
+        residual  = net_exposure − offset            # real remaining Δ exposure
+        cost      = |contracts| · 100 · put_price
+
+    Contracts are **whole** — you can't buy a fractional option — so
+    ``netExposureAfter`` is the *actual* residual delta exposure from the rounded
+    position (it won't be exactly 0, and can go slightly negative if rounding
+    over-hedges), rather than a tautological ``net·(1−fraction)``. ``put_delta``
+    is taken by magnitude (a hedge put has negative delta; we offset positive
+    long exposure). Note these are delta-equivalent figures at the current spot —
+    a long-put hedge protects the *downside* while retaining upside, it does not
+    symmetrically null exposure. Before/after leverage are exposure / NLV."""
+    pd = abs(put_delta)
+    denom = spx_level * contract_size * pd
+    if target_leverage is not None and nlv > 0 and denom:
+        required_offset = net_exposure - target_leverage * nlv
+        raw_contracts = required_offset / denom if required_offset > 0 else 0.0
+        contracts = float(math.ceil(raw_contracts)) if raw_contracts > 0 else 0.0
+    else:
+        raw_contracts = (hedge_fraction * net_exposure) / denom if denom else 0.0
+        contracts = float(round(raw_contracts))
+    offset = contracts * contract_size * spx_level * pd
+    residual = net_exposure - offset
+    cost = abs(contracts) * contract_size * put_price
+    return {
+        "contracts": contracts,
+        "rawContracts": raw_contracts,
+        "cost": cost,
+        "netExposureBefore": net_exposure,
+        "netExposureAfter": residual,
+        "deltaOffset": offset,
+        "leverageBefore": net_exposure / nlv if nlv else 0.0,
+        "leverageAfter": residual / nlv if nlv else 0.0,
+        "hedgeFraction": hedge_fraction,
+        "targetLeverage": target_leverage,
+        "putDelta": put_delta,
+        "putPrice": put_price,
+        "spxLevel": spx_level,
+    }
+
+
+def _synthetic_strikes(spx_level: float, step: float = 5.0) -> list[float]:
+    """A coarse strike grid around spot, used to snap model-fallback strikes when
+    no live option chain is available (≈ 0.5×–1.3× spot on a 5-pt grid)."""
+    lo = math.floor(spx_level * 0.5 / step) * step
+    hi = math.ceil(spx_level * 1.3 / step) * step
+    n = int(round((hi - lo) / step)) + 1
+    return [lo + i * step for i in range(n)]
+
+
+def _bs_leg(S, K, T, r, q, sigma, right, contracts, contract_size=100) -> dict:
+    """One Black-Scholes option leg. ``contracts`` is signed (long +, short −).
+    Reports the per-share ``price``/``delta`` plus the leg's whole-position
+    ``cost`` (+debit / −credit) and signed ``dollarDelta`` (contracts·100·S·δ)."""
+    price = bs_price(S, K, T, r, q, sigma, right)
+    delta = bs_greeks(S, K, T, r, q, sigma, right)["delta"]
+    return {
+        "right": right,
+        "strike": K,
+        "contracts": contracts,
+        "price": price,
+        "delta": delta,
+        "cost": contracts * contract_size * price,
+        "dollarDelta": contracts * contract_size * S * delta,
+    }
+
+
+def spx_hedge_proposals(
+    *,
+    net_exposure: float,
+    nlv: float,
+    spx_level: float,
+    dte: int,
+    r: float,
+    q: float,
+    sigma: float,
+    target_put_delta: float,
+    floor_put_delta: float,
+    hedge_fraction: float,
+    target_leverage: float | None,
+    strikes: list[float] | None = None,
+    contract_size: float = 100,
+) -> dict:
+    """Build three SPX-put hedge proposals that share one contract count ``N`` —
+    the long protective put sized (via :func:`spx_put_hedge`) to bring post-hedge
+    leverage at/under ``target_leverage``:
+
+      1. **long_put** — buy N puts at ``target_put_delta``. Full downside below
+         the strike; most expensive.
+      2. **vertical** — bear put spread: +N puts (``target_put_delta``) / −N puts
+         (``floor_put_delta``, strictly lower strike). Cheaper net debit;
+         protection is capped between the two strikes.
+      3. **seagull** — +N put / −N put (as the vertical) / −N call, the call
+         strike chosen so its credit ≈ the put-spread debit (**≈ zero-cost**);
+         caps upside at the call strike.
+
+    All legs are Black-Scholes priced off one flat IV (``sigma``) so the per-leg
+    premiums — and therefore the net cost across legs — are coherent. The
+    residual exposure of each proposal is the *real* one from the rounded N:
+    ``net_exposure + Σ leg dollar-delta``. Pure — an order-of-magnitude guide."""
+    T = max(dte, 1) / 365.0
+    grid = sorted(strikes) if strikes else _synthetic_strikes(spx_level)
+    snap = lambda k: min(grid, key=lambda s: abs(s - k))
+
+    # Long protective put — drives the shared contract count N.
+    long_k = snap(put_strike_for_delta(spx_level, target_put_delta, T, r, q, sigma))
+    long_leg = _bs_leg(spx_level, long_k, T, r, q, sigma, "P", 0, contract_size)
+    base = spx_put_hedge(
+        net_exposure=net_exposure, spx_level=spx_level, put_delta=long_leg["delta"],
+        put_price=long_leg["price"], hedge_fraction=hedge_fraction, nlv=nlv,
+        target_leverage=target_leverage, contract_size=contract_size,
+    )
+    n = base["contracts"]  # whole, >= 0
+
+    # Floor (short) put, snapped strictly below the long strike.
+    floor_raw = snap(put_strike_for_delta(spx_level, floor_put_delta, T, r, q, sigma))
+    below = [s for s in grid if s < long_k]
+    floor_k = floor_raw if floor_raw < long_k else (max(below) if below else long_k)
+
+    long_put = _bs_leg(spx_level, long_k, T, r, q, sigma, "P", n, contract_size)
+    short_put = _bs_leg(spx_level, floor_k, T, r, q, sigma, "P", -n, contract_size)
+
+    # Seagull short call: the strike whose credit ≈ the put-spread debit (per share).
+    target_credit = max(long_put["price"] - short_put["price"], 0.0)
+    calls = [s for s in grid if s > spx_level] or grid
+    call_k = min(calls, key=lambda s: abs(bs_price(spx_level, s, T, r, q, sigma, "C") - target_credit))
+    short_call = _bs_leg(spx_level, call_k, T, r, q, sigma, "C", -n, contract_size)
+
+    lev_before = net_exposure / nlv if nlv else 0.0
+
+    def proposal(kind: str, legs: list[dict], floor: float | None, cap: float | None) -> dict:
+        cost = sum(l["cost"] for l in legs)
+        offset = sum(l["dollarDelta"] for l in legs)
+        residual = net_exposure + offset
+        return {
+            "kind": kind,
+            "contracts": n,
+            "legs": legs,
+            "cost": cost,
+            "deltaOffset": offset,
+            "netExposureBefore": net_exposure,
+            "netExposureAfter": residual,
+            "leverageBefore": lev_before,
+            "leverageAfter": residual / nlv if nlv else 0.0,
+            "protectionFloor": floor,
+            "upsideCap": cap,
+            "maxProtection": n * contract_size * (long_k - floor_k) if floor is not None else None,
+        }
+
+    proposals = [
+        proposal("long_put", [long_put], None, None),
+        proposal("vertical", [long_put, short_put], floor_k, None),
+        proposal("seagull", [long_put, short_put, short_call], floor_k, call_k),
+    ]
+    return {
+        "contracts": n,
+        "targetLeverage": target_leverage,
+        "netExposureBefore": net_exposure,
+        "leverageBefore": lev_before,
+        "spxLevel": spx_level,
+        "dte": dte,
+        "iv": sigma * 100,
+        "longPutStrike": long_k,
+        "floorPutStrike": floor_k,
+        "proposals": proposals,
+    }
+
+
 def greeks_card(option_positions: list[dict]) -> dict[str, float]:
     return {
         "net_delta": sum(p["delta_shares"] for p in option_positions),

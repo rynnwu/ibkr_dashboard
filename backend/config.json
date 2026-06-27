@@ -13,5 +13,16 @@
   "risk_free_rate": 0.0425,
   "ib_gateway": {"host": "127.0.0.1", "port": 4001, "client_id": 7},
   "logo_api": {"provider": "financialmodelingprep", "api_key": "enabled"},
-  "margin_thresholds": {"warning_cushion": 0.20, "danger_cushion": 0.10}
+  "margin_thresholds": {"warning_cushion": 0.20, "danger_cushion": 0.10},
+  "beta_overrides": {},
+  "spx_hedge": {
+    "target_put_delta": 0.30,
+    "floor_put_delta": 0.12,
+    "target_dte": 30,
+    "assumed_iv": 0.20,
+    "hedge_fraction": 1.0,
+    "target_leverage": 1.0,
+    "spx_dividend_yield": 0.013,
+    "warning_leverage": 1.5
+  }
 }

@@ -5,10 +5,10 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from ib_insync import IB, Position
+from ib_insync import IB, Option, Position
 from pydantic import BaseModel
 
-from backend import cache, calc, config, ibkr_client, icons
+from backend import cache, calc, config, ibkr_client, icons, spx_cache
 
 app = FastAPI()
 icons.CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -17,15 +17,23 @@ CONFIG_PATH = Path(__file__).parent / "config.json"
 logger = logging.getLogger(__name__)
 
 
-def build_portfolio_response(positions: list[dict], nlv: float, icon_lookup: dict, warnings: list[str], margin: dict | None = None) -> dict:
+def build_portfolio_response(positions: list[dict], nlv: float, icon_lookup: dict, warnings: list[str], margin: dict | None = None, betas: dict | None = None, spx_level: float = 0.0, hedge_warning_leverage: float = 1.5) -> dict:
     """Assembles the full portfolio API payload (totals, leverage, greeks, per-underlying rows) from position records.
 
     ``margin`` is the optional calc.margin_summary() block; None when account
-    margin values were unavailable (it then renders nothing on the frontend)."""
+    margin values were unavailable (it then renders nothing on the frontend).
+
+    ``betas`` maps an underlying to its beta vs SPX (missing → 1.0); together
+    with ``spx_level`` it powers the SPX-hedge banner/panel (DESIGN §12) — the
+    payload carries the net beta-weighted dollar exposure, the beta-weighted
+    leverage, and per-underlying betas."""
     underlying_rows = calc.aggregate_by_underlying(positions)
     total_notional = sum(row["notional"] for row in underlying_rows)
     total_exposure = sum(row["exposure"] for row in underlying_rows)
     leverage = calc.portfolio_leverage(total_notional, total_exposure, nlv)
+
+    bw = calc.beta_weighted_exposure(positions, betas or {})
+    beta_by_underlying = {b["underlying"]: b["beta"] for b in bw["breakdown"]}
 
     option_positions = [
         {
@@ -48,6 +56,7 @@ def build_portfolio_response(positions: list[dict], nlv: float, icon_lookup: dic
             "exposure": row["exposure"],
             "color": color,
             "iconUrl": icon_url,
+            "beta": beta_by_underlying.get(row["underlying"]),
         })
 
     return {
@@ -59,6 +68,10 @@ def build_portfolio_response(positions: list[dict], nlv: float, icon_lookup: dic
         "netDelta": greeks["net_delta"],
         "netTheta": greeks["net_theta"],
         "netVega": greeks["net_vega"],
+        "netBetaWeightedExposure": bw["netBetaWeightedExposure"],
+        "betaWeightedLeverage": bw["netBetaWeightedExposure"] / nlv if nlv else 0.0,
+        "spxLevel": spx_level,
+        "spxHedgeWarningLeverage": hedge_warning_leverage,
         "underlyings": underlyings,
         "positions": positions,
         "margin": margin,
@@ -207,6 +220,156 @@ def suggest_call(req: SuggestCallRequest) -> dict:
     }
 
 
+class SpxHedgeRequest(BaseModel):
+    """Inputs for the SPX-put hedge sizing. ``netExposure``/``nlv`` come from the
+    client (held from the latest /api/portfolio: netBetaWeightedExposure / nlv).
+    The tunables default to config when omitted; ``spxLevel`` is a fallback used
+    only if the live SPX quote is unavailable. ``assumedIv`` is in percent."""
+
+    netExposure: float
+    nlv: float
+    hedgeFraction: float | None = None
+    targetLeverage: float | None = None
+    targetDelta: float | None = None
+    floorDelta: float | None = None  # lower (short) put leg for vertical/seagull
+    targetDte: int | None = None
+    assumedIv: float | None = None  # percent (e.g. 20.0 for 20%)
+    spxLevel: float | None = None
+
+
+@app.post("/api/spx-hedge")
+def compute_spx_hedge(req: SpxHedgeRequest) -> dict:
+    """Build the three SPX-hedge proposals (long put / vertical / seagull) against
+    the portfolio's net beta-weighted dollar exposure (DESIGN §12). **I/O-free:**
+    the SPX market inputs (level + chain + IV) come from the cache populated by the
+    last live portfolio refresh (``_cache_spx_market``); if no snapshot exists this
+    session it degrades to model pricing off the client-supplied ``spxLevel``. So
+    once the gateway has been up, hedge what-ifs recompute from cache with no new
+    IBKR connection."""
+    cfg = config.load_config(CONFIG_PATH)
+    target_delta = req.targetDelta if req.targetDelta is not None else cfg.spx_target_put_delta
+    floor_delta = req.floorDelta if req.floorDelta is not None else cfg.spx_floor_put_delta
+    target_dte = req.targetDte if req.targetDte is not None else cfg.spx_target_dte
+    iv_override = (req.assumedIv / 100.0) if req.assumedIv is not None else None
+    # Sizing precedence: explicit targetLeverage → explicit hedgeFraction → config
+    # default (target-leverage, i.e. the minimum hedge to get under target_leverage).
+    if req.targetLeverage is not None:
+        target_leverage, hedge_fraction = req.targetLeverage, cfg.spx_hedge_fraction
+    elif req.hedgeFraction is not None:
+        target_leverage, hedge_fraction = None, req.hedgeFraction
+    else:
+        target_leverage, hedge_fraction = cfg.spx_target_leverage, cfg.spx_hedge_fraction
+
+    market = _resolve_spx_market(cfg, req.spxLevel, target_dte)
+    sigma = iv_override if iv_override is not None else market["iv"]
+    result = calc.spx_hedge_proposals(
+        net_exposure=req.netExposure,
+        nlv=req.nlv,
+        spx_level=market["spxLevel"],
+        dte=market["dte"],
+        r=cfg.risk_free_rate,
+        q=cfg.spx_dividend_yield,
+        sigma=sigma,
+        target_put_delta=target_delta,
+        floor_put_delta=floor_delta,
+        hedge_fraction=hedge_fraction,
+        target_leverage=target_leverage,
+        strikes=market["strikes"],
+    )
+    result.update({
+        "source": market["source"],
+        "cachedAt": market["cachedAt"],
+        "targetDelta": target_delta,
+        "floorPutDelta": floor_delta,
+    })
+    return result
+
+
+def _resolve_spx_market(cfg: config.Config, spx_level_fallback: float | None, target_dte: int) -> dict:
+    """Resolve the SPX market inputs for the hedge proposals **without IBKR I/O**:
+    prefer the cache populated by the last live portfolio refresh
+    (``_cache_spx_market``), re-picking the expiry for the requested ``target_dte``
+    cap from the cached chain. With no cache this session, fall back to the
+    client-supplied SPX level + config assumed IV (model pricing, no chain → a
+    synthetic strike grid in ``calc``). Raises 503 only when there's neither."""
+    cached = spx_cache.load_spx()
+    if cached and cached.get("spxLevel"):
+        expirations = cached.get("expirations") or []
+        dte = _days_to_expiry(_pick_expiry(expirations, target_dte)) if expirations else target_dte
+        return {
+            "spxLevel": cached["spxLevel"],
+            "dte": dte,
+            "strikes": cached.get("strikes") or None,
+            "iv": cached.get("iv") or cfg.spx_assumed_iv,
+            "source": cached.get("source", "live"),
+            "cachedAt": cached.get("cachedAt"),
+        }
+    if not spx_level_fallback or spx_level_fallback <= 0:
+        raise HTTPException(status_code=503, detail="無法取得 SPX 指數價格,且無快照可用")
+    return {
+        "spxLevel": spx_level_fallback,
+        "dte": target_dte,
+        "strikes": None,
+        "iv": cfg.spx_assumed_iv,
+        "source": "model",
+        "cachedAt": None,
+    }
+
+
+def _cache_spx_market(ib: IB, cfg: config.Config) -> float:
+    """Snapshot the live SPX market inputs (index level + option chain + a
+    calibrated IV) into ``spx_cache`` for the I/O-free hedge endpoint, and return
+    the SPX level for the portfolio banner. IV is implied from a near-target live
+    put quote when the account has an options feed, else the config assumed IV
+    (still a live spot/chain, tagged 'model'). Best-effort: any failure leaves the
+    previous cache intact and is swallowed by the caller's try/except."""
+    level = ibkr_client.fetch_spx_level(ib)
+    if math.isnan(level):
+        return math.nan
+    iv, source = cfg.spx_assumed_iv, "model"
+    try:
+        expirations, strikes = ibkr_client.fetch_spx_option_params(ib)
+    except Exception:
+        logger.exception("SPX option-chain fetch failed; caching level only")
+        expirations, strikes = [], []
+    if expirations and strikes:
+        try:
+            chosen = _pick_expiry(expirations, cfg.spx_target_dte)
+            T = _days_to_expiry(chosen) / 365.0
+            raw_k = calc.put_strike_for_delta(level, cfg.spx_target_put_delta, T, cfg.risk_free_rate, cfg.spx_dividend_yield, cfg.spx_assumed_iv)
+            strike = min(strikes, key=lambda s: abs(s - raw_k))
+            quote = ibkr_client.fetch_option_quote(ib, Option("SPX", chosen, strike, "P", "SMART", tradingClass="SPX"))
+            if quote.get("iv") is not None:
+                iv, source = quote["iv"] / 100.0, "live"
+            elif quote.get("price") is not None:
+                iv = calc.implied_vol(quote["price"], level, strike, T, cfg.risk_free_rate, cfg.spx_dividend_yield, "P")
+                source = "live"
+        except Exception:
+            logger.exception("SPX IV calibration failed; using assumed IV")
+    spx_cache.save_spx({
+        "spxLevel": level,
+        "expirations": expirations,
+        "strikes": strikes,
+        "iv": iv,
+        "source": source,
+        "cachedAt": cache.now_iso(),
+    })
+    return level
+
+
+def _pick_expiry(expirations: list[str], target_dte: int) -> str:
+    """The YYYYMMDD expiry to hedge with, treating ``target_dte`` as a **cap**: the
+    longest-dated expiry that is still ≤ ``target_dte`` (so ``target_dte`` = 30
+    yields ≤ 30 DTE). Falls back to the nearest-dated expiry when every listed
+    expiry is beyond the cap."""
+    future = [e for e in expirations if _days_to_expiry(e) > 0]
+    pool = future or expirations
+    capped = [e for e in pool if _days_to_expiry(e) <= target_dte]
+    if capped:
+        return max(capped, key=_days_to_expiry)
+    return min(pool, key=_days_to_expiry)
+
+
 def _fetch_live_portfolio(cfg: config.Config) -> dict:
     """Connects to IB Gateway and builds a fresh portfolio payload. Raises on
     any connection/fetch failure (the caller decides whether to fall back to
@@ -215,6 +378,22 @@ def _fetch_live_portfolio(cfg: config.Config) -> dict:
     try:
         raw_positions, warnings = _collect_positions(ib, cfg)
         account_values = ibkr_client.fetch_account_values(ib)
+        underlyings = {p["underlying"] for p in raw_positions}
+        # Beta + SPX level feed the hedge banner/panel; a failure here must not
+        # sink the whole portfolio fetch (it still falls back to cache otherwise),
+        # so each degrades gracefully (betas → 1.0 default, spx_level → 0).
+        try:
+            ibkr_betas = ibkr_client.fetch_betas(ib, underlyings)
+        except Exception:
+            logger.exception("Beta fetch failed; defaulting all betas")
+            ibkr_betas = {}
+        try:
+            # Also caches the SPX option chain + calibrated IV so the (I/O-free)
+            # hedge endpoint can recompute proposals from cache (DESIGN §12).
+            spx_level = _cache_spx_market(ib, cfg)
+        except Exception:
+            logger.exception("SPX market fetch failed")
+            spx_level = math.nan
     finally:
         ib.disconnect()
 
@@ -223,12 +402,34 @@ def _fetch_live_portfolio(cfg: config.Config) -> dict:
         raise ValueError("NetLiquidation not found in account summary")
     margin = _build_margin(account_values, nlv, cfg)
 
-    underlyings = {p["underlying"] for p in raw_positions}
+    betas, defaulted = _resolve_betas(underlyings, ibkr_betas, cfg)
+    if defaulted:
+        warnings.append(f"Beta 預設為 1.0(IBKR 未提供且無 config 覆寫):{', '.join(sorted(defaulted))}")
+    if math.isnan(spx_level):
+        spx_level = 0.0
+
     icon_lookup = {
         symbol: icons.get_icon_and_color(symbol, cfg.logo_api_key)
         for symbol in underlyings
     }
-    return build_portfolio_response(raw_positions, nlv, icon_lookup, warnings, margin)
+    return build_portfolio_response(raw_positions, nlv, icon_lookup, warnings, margin, betas, spx_level, cfg.spx_warning_leverage)
+
+
+def _resolve_betas(underlyings: set[str], ibkr_betas: dict, cfg: config.Config) -> tuple[dict[str, float], list[str]]:
+    """Effective beta per underlying: config override first, then IBKR's
+    fundamental beta, else left out (the pure calc then defaults it to 1.0).
+    Returns (betas, symbols that fell through to the 1.0 default). Pure."""
+    betas: dict[str, float] = {}
+    defaulted: list[str] = []
+    for sym in underlyings:
+        b = cfg.beta_for(sym)
+        if b is None:
+            b = ibkr_betas.get(sym)
+        if b is None:
+            defaulted.append(sym)
+        else:
+            betas[sym] = b
+    return betas, defaulted
 
 
 def _build_margin(account_values: dict, nlv: float, cfg: config.Config) -> dict | None:

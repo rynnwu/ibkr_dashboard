@@ -378,3 +378,92 @@ def test_years_to_expiry_past_or_today_is_floored_to_one_day():
     today_str = date.today().strftime("%Y%m%d")
     fraction = main._years_to_expiry(today_str)
     assert fraction == 1 / 365.0
+
+
+def test_spx_hedge_endpoint_model_fallback_when_no_cache(monkeypatch):
+    # No SPX cache this session -> resolve off the client-supplied spxLevel and
+    # model-price the three proposals (no IBKR I/O in this endpoint).
+    monkeypatch.setattr(main.spx_cache, "load_spx", lambda *a, **k: None)
+    client = TestClient(main.app)
+    resp = client.post("/api/spx-hedge", json={
+        "netExposure": 1_000_000.0, "nlv": 500_000.0, "spxLevel": 5000.0,
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["source"] == "model"
+    assert body["spxLevel"] == 5000.0
+    assert body["targetLeverage"] == 1.0
+    assert body["contracts"] > 0 and body["contracts"] == round(body["contracts"])
+    assert body["leverageBefore"] == pytest.approx(2.0)
+
+    kinds = [p["kind"] for p in body["proposals"]]
+    assert kinds == ["long_put", "vertical", "seagull"]
+    by_kind = {p["kind"]: p for p in body["proposals"]}
+    # long put sized to bring leverage under the 1.0x target
+    assert by_kind["long_put"]["leverageAfter"] < 1.0
+    # vertical (a debit spread) is cheaper than the outright long put...
+    assert by_kind["vertical"]["cost"] < by_kind["long_put"]["cost"]
+    # ...and the seagull's short call credit makes it cheaper still (≈ zero-cost)
+    assert abs(by_kind["seagull"]["cost"]) < by_kind["vertical"]["cost"]
+    # seagull legs: long put / short put / short call
+    sea_legs = by_kind["seagull"]["legs"]
+    assert [(l["right"], l["contracts"] > 0) for l in sea_legs] == [("P", True), ("P", False), ("C", False)]
+    assert by_kind["seagull"]["upsideCap"] > body["spxLevel"]
+
+
+def test_spx_hedge_endpoint_uses_cached_spx_market(monkeypatch):
+    # A populated SPX cache (from the last live portfolio refresh) is used without
+    # any IBKR connection: level/strikes/iv come straight from it.
+    fake_cache = {
+        "spxLevel": 5200.0,
+        "expirations": ["20260710", "20260717", "20260814"],
+        "strikes": [float(k) for k in range(4000, 6001, 25)],
+        "iv": 0.18,
+        "source": "live",
+        "cachedAt": "2026-06-27T09:30:00+08:00",
+    }
+    monkeypatch.setattr(main.spx_cache, "load_spx", lambda *a, **k: fake_cache)
+    client = TestClient(main.app)
+    resp = client.post("/api/spx-hedge", json={"netExposure": 1_000_000.0, "nlv": 500_000.0})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["source"] == "live"
+    assert body["spxLevel"] == 5200.0
+    assert body["cachedAt"] == "2026-06-27T09:30:00+08:00"
+    assert body["iv"] == pytest.approx(18.0)  # cached 0.18 -> percent
+    # strikes snapped to the cached 25-pt chain grid
+    assert body["longPutStrike"] % 25 == 0
+
+
+def test_spx_hedge_endpoint_503_when_no_cache_and_no_fallback(monkeypatch):
+    monkeypatch.setattr(main.spx_cache, "load_spx", lambda *a, **k: None)
+    client = TestClient(main.app)
+    resp = client.post("/api/spx-hedge", json={"netExposure": 1_000_000.0, "nlv": 500_000.0})
+    assert resp.status_code == 503
+    assert "SPX" in resp.json()["detail"]
+
+
+def test_build_portfolio_response_carries_beta_weighted_fields():
+    positions = [
+        {"label": "NVDA", "underlying": "NVDA", "type": "STK", "notional": 50000.0,
+         "exposure": 50000.0, "discount": 0.0, "delta": 1.0, "iv": None, "quantity": 100},
+    ]
+    result = main.build_portfolio_response(
+        positions=positions, nlv=200000.0, icon_lookup={}, warnings=[],
+        betas={"NVDA": 2.0}, spx_level=5000.0, hedge_warning_leverage=1.5,
+    )
+    assert result["netBetaWeightedExposure"] == pytest.approx(100000.0)  # 50000 * 2.0
+    assert result["betaWeightedLeverage"] == pytest.approx(0.5)
+    assert result["spxLevel"] == 5000.0
+    assert result["spxHedgeWarningLeverage"] == 1.5
+    assert result["underlyings"][0]["beta"] == 2.0
+
+
+def test_resolve_betas_prefers_config_override_then_ibkr_then_default():
+    cfg = _fake_cfg()
+    cfg._beta_overrides = {"AAA": 1.5}
+    betas, defaulted = main._resolve_betas({"AAA", "BBB", "CCC"}, {"BBB": 1.2}, cfg)
+    assert betas["AAA"] == 1.5   # config override wins
+    assert betas["BBB"] == 1.2   # IBKR fundamental
+    assert "CCC" not in betas    # nothing -> default later
+    assert defaulted == ["CCC"]

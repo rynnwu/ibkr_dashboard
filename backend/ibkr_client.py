@@ -9,7 +9,7 @@ import random
 
 from collections.abc import Iterable
 
-from ib_insync import IB, Stock, Option, Position, Ticker
+from ib_insync import IB, Stock, Option, Index, Position, Ticker
 
 
 def mark_price(ticker: Ticker) -> float:
@@ -169,3 +169,119 @@ def fetch_market_data(
     # stable even before qualification.
     option_ticker_map = {c.conId: t for c, t in zip(option_contracts, tickers[n:])}
     return price_map, option_ticker_map
+
+
+def _beta_of(ticker: Ticker) -> float | None:
+    """Pull the beta out of a ticker's fundamental ratios (generic tick 258), or
+    None when absent/unparseable. ib_insync exposes it as
+    ``ticker.fundamentalRatios.BETA``."""
+    fr = getattr(ticker, "fundamentalRatios", None)
+    beta = getattr(fr, "BETA", None) if fr is not None else None
+    if beta is None:
+        return None
+    try:
+        b = float(beta)
+    except (ValueError, TypeError):
+        return None
+    return None if math.isnan(b) else b
+
+
+def fetch_betas(
+    ib: IB,
+    symbols: Iterable[str],
+    timeout: float = 8.0,
+    poll_interval: float = 0.5,
+    exchange: str = "SMART",
+    currency: str = "USD",
+) -> dict[str, float | None]:
+    """Per-symbol beta vs the S&P 500 from IBKR fundamental ratios (generic tick
+    258). Returns {symbol -> beta or None}; None means IBKR didn't supply it
+    (no Reuters-fundamentals entitlement, or an index/ETF with no beta) and the
+    caller should fall back to a config override or 1.0.
+
+    Kept separate from ``fetch_market_data`` so the proven price-snapshot path is
+    untouched: this uses a *streaming* (non-snapshot) request because the
+    fundamental-ratios tick isn't delivered on plain snapshots, with the same
+    bounded/polled wait + cancel discipline (DESIGN §G9). Read-only."""
+    symbols = list(symbols)
+    if not symbols:
+        return {}
+    contracts = [Stock(s, exchange, currency) for s in symbols]
+    ib.qualifyContracts(*contracts)
+    tickers = [ib.reqMktData(c, "258", snapshot=False) for c in contracts]
+    try:
+        elapsed = 0.0
+        while elapsed < timeout:
+            ib.sleep(poll_interval)
+            elapsed += poll_interval
+            if all(_beta_of(t) is not None for t in tickers):
+                break
+    finally:
+        for c in contracts:
+            ib.cancelMktData(c)
+    return {sym: _beta_of(t) for sym, t in zip(symbols, tickers)}
+
+
+def fetch_spx_level(ib: IB, timeout: float = 10.0, poll_interval: float = 0.5) -> float:
+    """Snapshot mark for the SPX cash index (NaN if it never priced). Read-only."""
+    spx = Index("SPX", "CBOE", "USD")
+    ib.qualifyContracts(spx)
+    ticker = ib.reqMktData(spx, "", snapshot=True)
+    try:
+        elapsed = 0.0
+        while elapsed < timeout:
+            ib.sleep(poll_interval)
+            elapsed += poll_interval
+            if not math.isnan(mark_price(ticker)):
+                break
+    finally:
+        ib.cancelMktData(spx)
+    return mark_price(ticker)
+
+
+def fetch_spx_option_params(ib: IB) -> tuple[list[str], list[float]]:
+    """SPX option-chain expirations + strikes via reqSecDefOptParams. Returns
+    (sorted YYYYMMDD expirations, sorted strikes). Prefers the SMART/SPX chain,
+    unioning across returned chains as a fallback. Read-only."""
+    spx = Index("SPX", "CBOE", "USD")
+    ib.qualifyContracts(spx)
+    chains = ib.reqSecDefOptParams(spx.symbol, "", spx.secType, spx.conId)
+    if not chains:
+        return [], []
+    preferred = [c for c in chains if c.exchange == "SMART" and c.tradingClass == "SPX"]
+    selected = preferred or chains
+    expirations: set[str] = set()
+    strikes: set[float] = set()
+    for c in selected:
+        expirations.update(c.expirations)
+        strikes.update(c.strikes)
+    return sorted(expirations), sorted(strikes)
+
+
+def fetch_option_quote(
+    ib: IB, option: Option, timeout: float = 10.0, poll_interval: float = 0.5
+) -> dict:
+    """Snapshot quote + model greeks for a single option (generic tick 106 for
+    the option-computation/greeks). Returns {price, delta, iv} with None/NaN when
+    the account has no options data feed (caller then model-prices). Read-only —
+    no order methods."""
+    if not option.exchange:
+        option.exchange = "SMART"
+    ib.qualifyContracts(option)
+    ticker = ib.reqMktData(option, "106", snapshot=True)
+    try:
+        elapsed = 0.0
+        while elapsed < timeout:
+            ib.sleep(poll_interval)
+            elapsed += poll_interval
+            if not math.isnan(mark_price(ticker)) and ticker.modelGreeks:
+                break
+    finally:
+        ib.cancelMktData(option)
+    price = mark_price(ticker)
+    greeks = ticker.modelGreeks
+    return {
+        "price": None if math.isnan(price) else price,
+        "delta": greeks.delta if greeks and greeks.delta is not None else None,
+        "iv": (greeks.impliedVol * 100) if greeks and greeks.impliedVol is not None else None,
+    }
