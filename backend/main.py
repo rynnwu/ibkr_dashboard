@@ -136,7 +136,7 @@ class RollWhatIfRequest(BaseModel):
 @app.post("/api/roll-what-if")
 def compute_roll_what_if(req: RollWhatIfRequest) -> dict:
     """Pure roll what-if estimate (no gateway connection). See calc.roll_what_if
-    and TODO.md for the math + limitations."""
+    and DESIGN.md §11 for the math + limitations."""
     cfg = config.load_config(CONFIG_PATH)
     mm_sp = (
         req.mmSpOverride

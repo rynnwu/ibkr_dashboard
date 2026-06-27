@@ -333,8 +333,8 @@ Goal: estimate, on the dashboard, the effect of **closing a short put and
 opening a long call (or buying a 2x ETF)** on (a) the margin/liquidation buffer
 and (b) whether there's enough cash to execute the roll. It's an extension of
 the margin-buffer card (§4) — same two axes (liquidation vs. funding), same
-`cushion_level` thresholds. Full derivation + limitations live in
-[`TODO.md`](TODO.md).
+`cushion_level` thresholds. Full derivation + limitations are in this section
+and the `calc.py` docstrings.
 
 - **Backend math** is pure in `calc.py`:
   - `roll_what_if(...)` — given current `excess_liquidity`/`nlv` (+ optional

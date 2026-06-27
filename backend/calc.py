@@ -239,7 +239,7 @@ def roll_what_if(
 ) -> dict:
     """Estimate the effect of rolling a short put into a long call and/or a
     leveraged ETF, on two independent axes (mirroring ``margin_summary``). Pure;
-    see TODO.md for the derivation and the (important) limitations — this is an
+    see DESIGN.md §11 for the derivation and the (important) limitations — this is an
     order-of-magnitude guide, not a substitute for TWS What-If under PM.
 
     (a) Liquidation buffer. Closing the short put releases its maintenance
@@ -292,7 +292,7 @@ def roll_what_if(
         result["canExecute"] = surplus >= 0
         result["shortfall"] = max(-surplus, 0.0)
     if available_funds is not None:
-        # Aggregate cross-check (TODO.md §2): releasing the put frees ~mm_sp of
+        # Aggregate cross-check: releasing the put frees ~mm_sp of
         # initial margin back into AvailableFunds.
         result["availableFundsAfter"] = available_funds + mm_sp
 
