@@ -408,18 +408,34 @@ then **beta-weighted to SPX**:
 per-underlying `beta` into the `/api/portfolio` payload, so the banner renders
 immediately.
 
-### Beta source
+### Beta source + concurrent hedge-market fetch (perf)
 
 Per-underlying beta vs the S&P 500 comes from IBKR **fundamental ratios (generic
-tick `258`)** — `ibkr_client.fetch_betas()` (a *streaming*, non-snapshot request
-because the ratios tick isn't delivered on plain snapshots; same bounded/polled
-wait + cancel as `fetch_market_data`, kept separate so the proven price path is
-untouched). `main._resolve_betas()` then applies precedence: **config
-`beta_overrides` → IBKR fundamental beta → 1.0 default** (defaulted symbols are
-surfaced as a `warnings[]` note). Risk: tick 258 needs Reuters-fundamentals
-entitlement and may be missing for indices/ETFs — the override + 1.0 fallback
-keep the feature working regardless. A beta- or SPX-fetch failure is caught and
-degrades (betas → 1.0, `spxLevel` → 0) without sinking the portfolio fetch.
+tick `258`)**, a *streaming* (non-snapshot) request because the ratios tick isn't
+delivered on plain snapshots. `main._resolve_betas()` then applies precedence:
+**config `beta_overrides` → IBKR fundamental beta → 1.0 default** (defaulted
+symbols are surfaced as a `warnings[]` note). Risk: tick 258 needs
+Reuters-fundamentals entitlement and may be missing for indices/ETFs — the
+override + 1.0 fallback keep the feature working regardless.
+
+**Why these aren't fetched serially (the §12 perf regression + fix).** Originally
+betas (`fetch_betas`, ≤8s) and the SPX level (`fetch_spx_level`, ≤10s) ran one
+*after* the other inside `_fetch_live_portfolio`, and on an account **without**
+Reuters-fundamentals / index-data entitlement each never early-exits and burns its
+*full* timeout — ~20s of dead serial waiting that pushed a refresh from ~15s to
+~28s+ (the user-visible "IBKR timeout after hedge"). Fix:
+**`ibkr_client.fetch_hedge_market(ib, beta_symbols, etf_symbols)`** issues *all* of
+it — betas (258 streaming), the SPX index level (snapshot), and the §13
+candidate-ETF spot levels (snapshot) — up front and polls **once**; ib_insync is
+asyncio so the replies stream in concurrently and the cost collapses to a single
+bounded window. It also has a **grace early-exit**: once the reliably-fast ETF
+spot marks are in, it won't let possibly-absent fundamentals / an intermittent
+index quote hold the wait to the full ceiling. The ceiling is
+`config.json → hedge_fetch_timeout` (default 5s; also passed to the SPX
+IV-calibration `fetch_option_quote`). Measured: the hedge block dropped from
+~20s to ~4–5s. The proven `fetch_market_data` price path (DESIGN G9) is left
+untouched. A beta/SPX/ETF-fetch failure is caught and degrades (betas → 1.0,
+`spxLevel` → 0, ETF levels → null) without sinking the portfolio fetch.
 
 ### Sizing: target-leverage vs fraction
 
@@ -468,13 +484,16 @@ put gives back delta) — surfaced honestly in the UI, not hidden.
 what-if endpoints. The live SPX inputs come from a cache populated by the
 *portfolio* refresh, not a fresh connection per hedge what-if:
 
-- `main._cache_spx_market(ib, cfg)` runs inside `_fetch_live_portfolio` (which
-  already holds a connection): it fetches the SPX index level + option-chain
-  params, **calibrates IV** by implying it from a near-target live put quote
-  (`fetch_option_quote`, greeks tick `106`) when an options feed exists (else the
-  config assumed IV), and writes `{spxLevel, expirations, strikes, iv, source,
-  cachedAt}` to **`backend/spx_cache.py`** (file `backend/spx_hedge_cache.json`,
-  gitignored, fully best-effort — a failure leaves the prior cache intact).
+- `main._cache_spx_market(ib, cfg, level)` runs inside `_fetch_live_portfolio`
+  (which already holds a connection). The SPX index **`level`** is the one already
+  obtained in the concurrent `fetch_hedge_market` call above (no second index
+  round-trip); this fn fetches the option-chain params, **calibrates IV** by
+  implying it from a near-target live put quote (`fetch_option_quote`, greeks tick
+  `106`) when an options feed exists (else the config assumed IV), and writes
+  `{spxLevel, expirations, strikes, iv, source, cachedAt}` to
+  **`backend/spx_cache.py`** (file `backend/spx_hedge_cache.json`, gitignored,
+  fully best-effort — a failure leaves the prior cache intact). It's a no-op when
+  `level` is NaN (no live SPX this session).
 - `compute_spx_hedge` → `_resolve_spx_market` **loads that cache** (re-picking the
   expiry for the requested `target_dte` cap from the cached chain) and calls
   `spx_hedge_proposals`. So tweaking DTE / delta / strategy recomputes instantly
@@ -511,3 +530,65 @@ Order-of-magnitude only: it treats the whole signed beta-weighted exposure as
 SPX-correlated (ignores skew, cross-correlation drift, and basis), and beta is a
 trailing single-number proxy. Real hedge selection still depends on the user's
 strike/expiry judgement.
+
+## 13. ETF-hedge comparison (各 ETF 避險比較)
+
+Goal: answer two things off the *same* signed exposure base as §12 — **(1) which
+ETF (SPY / QQQ / SMH / …) best fits the book to hedge with**, and **(2) the
+current exposure as a multiple of NLV in each ETF's own terms**. Like §11/§12
+it's an order-of-magnitude guide.
+
+- **Pure + I/O-free, embedded in `/api/portfolio`.** Deliberately **not** a
+  separate endpoint and adds **no IBKR round-trip** — this is the explicit
+  performance constraint (the §12 live betas/SPX fetches already pushed refresh to
+  ~28s). `calc.etf_hedge_candidates(positions, etf_specs, nlv,
+  threshold)` runs inside `build_portfolio_response` over the per-underlying signed
+  `signed_dollar_delta` already computed for §12, beta-weighted to each ETF via a
+  **config beta map** (no live correlation/historical-data fetch).
+- **Config** `config.json → hedge_etfs`: `concentration_threshold` (0.6) + a
+  `candidates` list, each `{symbol, label, broad: bool, defaultBeta, betas:
+  {underlying → beta vs this ETF}}`. A holding is *covered* by an ETF when it has
+  an explicit `betas` entry (in its universe; a `broad` ETF covers every name as
+  market beta, `defaultBeta` ≈ 1.0); a sector ETF's `defaultBeta` ≈ 0 for names
+  outside it. The seeded betas are **user-maintained estimates**, not live data.
+  Exposed on `Config` as `hedge_etf_specs` / `hedge_concentration_threshold`.
+- **Per ETF E** (over per-underlying signed $-delta `s_u`): `netExposure` =
+  Σ s_u·beta(u,E); `leverage` = netExposure / NLV (**the ×NLV multiple**);
+  `coverage` = Σ_{u in E} |s_u| / Σ|s_u| (share of gross directional exposure in
+  E's universe). **Recommendation**: the most-covering *sector* ETF whose coverage
+  ≥ `concentration_threshold` (a tighter, cheaper hedge for a concentrated book),
+  else the broad-market ETF — returned as `recommended` + `recommendedReason`
+  (`concentrated` / `broad` / `fallback` / `none`).
+- **Payload**: `etfHedge: {candidates[] (coverage-desc), recommended,
+  recommendedReason, concentrationThreshold}`; each candidate also carries `level`
+  (its spot price, or null) — fetched cheaply alongside betas (see §12 "concurrent
+  hedge-market fetch"). Mirrored in `frontend/src/types.ts` (`EtfHedge`,
+  `EtfHedgeCandidate`). **Frontend** `components/EtfHedgeTable.tsx` — an
+  always-shown compact card (sibling above `SpxHedge`) with the suggestion line + a
+  table (ETF · 涵蓋持股 % · Beta 加權曝險 · 現為 NLV 倍數, recommended row
+  starred/highlighted, the ×NLV multiple colored by stretch).
+
+### Sizing the hedge against the suggested ETF (selectable instrument)
+
+The §12 hedge what-if panel (`components/SpxHedge.tsx` / `POST /api/spx-hedge`) is
+no longer SPX-only: it has a **hedge-instrument selector** defaulting to
+`etfHedge.recommended`. `SpxHedgeRequest` gained `symbol` / `level` /
+`dividendYield`:
+
+- `symbol` absent or `"SPX"` → unchanged §12 behavior (SPX market from the cache;
+  SPX dividend yield).
+- a non-SPX ETF → `compute_spx_hedge` routes to **`_resolve_etf_market`**: the
+  client sends that ETF's own **ETF-weighted `netExposure`** (from the matching
+  `etfHedge` candidate) plus its spot `level` and `dividendYield`. The proposals
+  are **model-priced** (no chain → `calc`'s synthetic strike grid, `assumedIv`),
+  reusing the *same* symbol-agnostic `calc.spx_hedge_proposals`. Still **I/O-free**;
+  the result echoes `symbol`. If `level` is missing/≤0 it 503s with a prompt to
+  enter the ETF spot (the frontend shows an editable spot field when the
+  candidate's `level` is null). The three proposal cards + leg text relabel to the
+  chosen symbol.
+
+- **Hard limit** (in-UI caveat): betas are static config estimates, not live
+  correlations; coverage is universe membership, not true tracking error. It
+  flags the *better-fitting* instrument and sizes the exposure; ETF mode is always
+  model-priced (synthetic strikes), so strike/expiry and the actual hedge ticket
+  remain the user's call.

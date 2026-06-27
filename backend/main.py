@@ -17,7 +17,7 @@ CONFIG_PATH = Path(__file__).parent / "config.json"
 logger = logging.getLogger(__name__)
 
 
-def build_portfolio_response(positions: list[dict], nlv: float, icon_lookup: dict, warnings: list[str], margin: dict | None = None, betas: dict | None = None, spx_level: float = 0.0, hedge_warning_leverage: float = 1.5) -> dict:
+def build_portfolio_response(positions: list[dict], nlv: float, icon_lookup: dict, warnings: list[str], margin: dict | None = None, betas: dict | None = None, spx_level: float = 0.0, hedge_warning_leverage: float = 1.5, etf_specs: list | None = None, etf_concentration_threshold: float = 0.6, etf_levels: dict | None = None) -> dict:
     """Assembles the full portfolio API payload (totals, leverage, greeks, per-underlying rows) from position records.
 
     ``margin`` is the optional calc.margin_summary() block; None when account
@@ -34,6 +34,11 @@ def build_portfolio_response(positions: list[dict], nlv: float, icon_lookup: dic
 
     bw = calc.beta_weighted_exposure(positions, betas or {})
     beta_by_underlying = {b["underlying"]: b["beta"] for b in bw["breakdown"]}
+
+    # I/O-free ETF-hedge comparison (DESIGN §13): which candidate ETF best fits the
+    # book + each ETF's current exposure as a multiple of NLV. Pure, from positions
+    # + config beta maps — adds no IBKR round-trip.
+    etf_hedge = calc.etf_hedge_candidates(positions, etf_specs or [], nlv, etf_concentration_threshold, etf_levels or {})
 
     option_positions = [
         {
@@ -72,6 +77,7 @@ def build_portfolio_response(positions: list[dict], nlv: float, icon_lookup: dic
         "betaWeightedLeverage": bw["netBetaWeightedExposure"] / nlv if nlv else 0.0,
         "spxLevel": spx_level,
         "spxHedgeWarningLeverage": hedge_warning_leverage,
+        "etfHedge": etf_hedge,
         "underlyings": underlyings,
         "positions": positions,
         "margin": margin,
@@ -235,17 +241,30 @@ class SpxHedgeRequest(BaseModel):
     targetDte: int | None = None
     assumedIv: float | None = None  # percent (e.g. 20.0 for 20%)
     spxLevel: float | None = None
+    # Hedge-instrument selection (DESIGN §13). ``symbol`` absent or "SPX" → the
+    # default SPX-put hedge (market from the SPX cache). For a non-SPX ETF the
+    # client sends that ETF's own ETF-weighted ``netExposure``, its spot ``level``
+    # (required), and ``dividendYield``; proposals are model-priced (synthetic
+    # strike grid, no chain in cache).
+    symbol: str | None = None
+    level: float | None = None  # the chosen ETF's spot (required for non-SPX)
+    dividendYield: float | None = None  # the chosen ETF's dividend yield (non-SPX)
 
 
 @app.post("/api/spx-hedge")
 def compute_spx_hedge(req: SpxHedgeRequest) -> dict:
-    """Build the three SPX-hedge proposals (long put / vertical / seagull) against
-    the portfolio's net beta-weighted dollar exposure (DESIGN §12). **I/O-free:**
-    the SPX market inputs (level + chain + IV) come from the cache populated by the
-    last live portfolio refresh (``_cache_spx_market``); if no snapshot exists this
-    session it degrades to model pricing off the client-supplied ``spxLevel``. So
-    once the gateway has been up, hedge what-ifs recompute from cache with no new
-    IBKR connection."""
+    """Build the three protective-put proposals (long put / vertical / seagull)
+    against the portfolio's net beta-weighted dollar exposure (DESIGN §12/§13).
+    **I/O-free.**
+
+    The hedge instrument is selectable. When ``symbol`` is absent or "SPX" this is
+    the default SPX-put hedge: the SPX market inputs (level + chain + IV) come from
+    the cache populated by the last live portfolio refresh (``_cache_spx_market``),
+    falling back to model pricing off the client-supplied ``spxLevel``. When
+    ``symbol`` is a non-SPX ETF, the market is built straight from the request —
+    the client-supplied ``level`` as the spot, no chain (→ synthetic strikes),
+    ``assumedIv``/config IV, and ``dividendYield`` as ``q`` — so it's always
+    model-priced. Either way no new IBKR connection is opened."""
     cfg = config.load_config(CONFIG_PATH)
     target_delta = req.targetDelta if req.targetDelta is not None else cfg.spx_target_put_delta
     floor_delta = req.floorDelta if req.floorDelta is not None else cfg.spx_floor_put_delta
@@ -260,7 +279,14 @@ def compute_spx_hedge(req: SpxHedgeRequest) -> dict:
     else:
         target_leverage, hedge_fraction = cfg.spx_target_leverage, cfg.spx_hedge_fraction
 
-    market = _resolve_spx_market(cfg, req.spxLevel, target_dte)
+    symbol = (req.symbol or "SPX").strip() or "SPX"
+    is_spx = symbol.upper() == "SPX"
+    if is_spx:
+        market = _resolve_spx_market(cfg, req.spxLevel, target_dte)
+        q = cfg.spx_dividend_yield
+    else:
+        market = _resolve_etf_market(req.level, target_dte, cfg.spx_assumed_iv)
+        q = req.dividendYield if req.dividendYield is not None else 0.0
     sigma = iv_override if iv_override is not None else market["iv"]
     result = calc.spx_hedge_proposals(
         net_exposure=req.netExposure,
@@ -268,7 +294,7 @@ def compute_spx_hedge(req: SpxHedgeRequest) -> dict:
         spx_level=market["spxLevel"],
         dte=market["dte"],
         r=cfg.risk_free_rate,
-        q=cfg.spx_dividend_yield,
+        q=q,
         sigma=sigma,
         target_put_delta=target_delta,
         floor_put_delta=floor_delta,
@@ -277,12 +303,31 @@ def compute_spx_hedge(req: SpxHedgeRequest) -> dict:
         strikes=market["strikes"],
     )
     result.update({
+        "symbol": symbol,
         "source": market["source"],
         "cachedAt": market["cachedAt"],
         "targetDelta": target_delta,
         "floorPutDelta": floor_delta,
     })
     return result
+
+
+def _resolve_etf_market(level: float | None, target_dte: int, assumed_iv: float) -> dict:
+    """Resolve the market inputs for a non-SPX ETF hedge straight from the request
+    (no cache, no IBKR I/O): the client-supplied spot ``level``, no option chain
+    (``strikes=None`` → ``calc`` builds a synthetic strike grid), and the config
+    assumed IV. Always model-priced. Raises a friendly 503 when ``level`` is
+    missing/≤0 (the client must supply the ETF's spot for model pricing)."""
+    if not level or level <= 0:
+        raise HTTPException(status_code=503, detail="此 ETF 無現價,請手動輸入現價以進行模型試算")
+    return {
+        "spxLevel": level,
+        "dte": target_dte,
+        "strikes": None,
+        "iv": assumed_iv,
+        "source": "model",
+        "cachedAt": None,
+    }
 
 
 def _resolve_spx_market(cfg: config.Config, spx_level_fallback: float | None, target_dte: int) -> dict:
@@ -316,16 +361,17 @@ def _resolve_spx_market(cfg: config.Config, spx_level_fallback: float | None, ta
     }
 
 
-def _cache_spx_market(ib: IB, cfg: config.Config) -> float:
-    """Snapshot the live SPX market inputs (index level + option chain + a
-    calibrated IV) into ``spx_cache`` for the I/O-free hedge endpoint, and return
-    the SPX level for the portfolio banner. IV is implied from a near-target live
-    put quote when the account has an options feed, else the config assumed IV
-    (still a live spot/chain, tagged 'model'). Best-effort: any failure leaves the
-    previous cache intact and is swallowed by the caller's try/except."""
-    level = ibkr_client.fetch_spx_level(ib)
+def _cache_spx_market(ib: IB, cfg: config.Config, level: float) -> None:
+    """Snapshot the live SPX market inputs (option chain + a calibrated IV) into
+    ``spx_cache`` for the I/O-free hedge endpoint. ``level`` is the SPX index level
+    already fetched in the one concurrent ``fetch_hedge_market`` call (no second
+    index round-trip). IV is implied from a near-target live put quote when the
+    account has an options feed, else the config assumed IV (still a live
+    spot/chain, tagged 'model'). No-op when ``level`` is NaN (no live SPX this
+    session). Best-effort: any failure leaves the previous cache intact and is
+    swallowed by the caller's try/except."""
     if math.isnan(level):
-        return math.nan
+        return
     iv, source = cfg.spx_assumed_iv, "model"
     try:
         expirations, strikes = ibkr_client.fetch_spx_option_params(ib)
@@ -338,7 +384,7 @@ def _cache_spx_market(ib: IB, cfg: config.Config) -> float:
             T = _days_to_expiry(chosen) / 365.0
             raw_k = calc.put_strike_for_delta(level, cfg.spx_target_put_delta, T, cfg.risk_free_rate, cfg.spx_dividend_yield, cfg.spx_assumed_iv)
             strike = min(strikes, key=lambda s: abs(s - raw_k))
-            quote = ibkr_client.fetch_option_quote(ib, Option("SPX", chosen, strike, "P", "SMART", tradingClass="SPX"))
+            quote = ibkr_client.fetch_option_quote(ib, Option("SPX", chosen, strike, "P", "SMART", tradingClass="SPX"), timeout=cfg.hedge_fetch_timeout)
             if quote.get("iv") is not None:
                 iv, source = quote["iv"] / 100.0, "live"
             elif quote.get("price") is not None:
@@ -354,7 +400,6 @@ def _cache_spx_market(ib: IB, cfg: config.Config) -> float:
         "source": source,
         "cachedAt": cache.now_iso(),
     })
-    return level
 
 
 def _pick_expiry(expirations: list[str], target_dte: int) -> str:
@@ -379,21 +424,28 @@ def _fetch_live_portfolio(cfg: config.Config) -> dict:
         raw_positions, warnings = _collect_positions(ib, cfg)
         account_values = ibkr_client.fetch_account_values(ib)
         underlyings = {p["underlying"] for p in raw_positions}
-        # Beta + SPX level feed the hedge banner/panel; a failure here must not
-        # sink the whole portfolio fetch (it still falls back to cache otherwise),
-        # so each degrades gracefully (betas → 1.0 default, spx_level → 0).
+        etf_symbols = [spec["symbol"] for spec in cfg.hedge_etf_specs]
+        # Betas + SPX level + candidate-ETF spot levels feed the hedge banner/panel
+        # (§12/§13). Fetched in ONE concurrent bounded wait (was two serial waits
+        # that each burned a full timeout on an unentitled account — DEBUG §1d). A
+        # failure must not sink the whole portfolio fetch, so it degrades
+        # gracefully (betas → 1.0 default, spx_level → 0, ETF levels → None).
         try:
-            ibkr_betas = ibkr_client.fetch_betas(ib, underlyings)
+            hedge_market = ibkr_client.fetch_hedge_market(
+                ib, underlyings, etf_symbols, timeout=cfg.hedge_fetch_timeout
+            )
+            ibkr_betas = {k: v for k, v in hedge_market["betas"].items() if v is not None}
+            spx_level = hedge_market["spxLevel"]
+            etf_levels = {k: v for k, v in hedge_market["etfLevels"].items() if v is not None}
         except Exception:
-            logger.exception("Beta fetch failed; defaulting all betas")
-            ibkr_betas = {}
+            logger.exception("Hedge-market fetch failed; defaulting betas/SPX/ETF levels")
+            ibkr_betas, spx_level, etf_levels = {}, math.nan, {}
         try:
-            # Also caches the SPX option chain + calibrated IV so the (I/O-free)
-            # hedge endpoint can recompute proposals from cache (DESIGN §12).
-            spx_level = _cache_spx_market(ib, cfg)
+            # Cache the SPX option chain + calibrated IV (reusing the level above) so
+            # the I/O-free hedge endpoint can recompute proposals from cache (§12).
+            _cache_spx_market(ib, cfg, spx_level)
         except Exception:
-            logger.exception("SPX market fetch failed")
-            spx_level = math.nan
+            logger.exception("SPX market cache failed")
     finally:
         ib.disconnect()
 
@@ -412,7 +464,7 @@ def _fetch_live_portfolio(cfg: config.Config) -> dict:
         symbol: icons.get_icon_and_color(symbol, cfg.logo_api_key)
         for symbol in underlyings
     }
-    return build_portfolio_response(raw_positions, nlv, icon_lookup, warnings, margin, betas, spx_level, cfg.spx_warning_leverage)
+    return build_portfolio_response(raw_positions, nlv, icon_lookup, warnings, margin, betas, spx_level, cfg.spx_warning_leverage, cfg.hedge_etf_specs, cfg.hedge_concentration_threshold, etf_levels)
 
 
 def _resolve_betas(underlyings: set[str], ibkr_betas: dict, cfg: config.Config) -> tuple[dict[str, float], list[str]]:

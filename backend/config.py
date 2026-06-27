@@ -29,6 +29,16 @@ class Config:
     spx_target_leverage: float = 1.0
     spx_dividend_yield: float = 0.013
     spx_warning_leverage: float = 1.5
+    # Candidate hedge ETFs (SPY/QQQ/SMH/…) for the "which ETF fits the book best"
+    # comparison (DESIGN §13). Each spec: {symbol,label,broad,defaultBeta,betas}.
+    # concentration_threshold is the coverage above which a sector ETF is preferred
+    # over the broad market as the suggested hedge.
+    hedge_etf_specs: list = field(default_factory=list)
+    hedge_concentration_threshold: float = 0.6
+    # Single bounded-wait ceiling for the concurrent hedge-market fetch (betas +
+    # SPX level + ETF spots). Kept short because on an unentitled account those
+    # ticks never arrive and the wait can't early-exit — see DEBUG §1d.
+    hedge_fetch_timeout: float = 5.0
     _dividend_yield: dict = field(default_factory=dict)
     _beta_overrides: dict = field(default_factory=dict)
 
@@ -47,9 +57,11 @@ def load_config(path: Path) -> Config:
     logo = raw["logo_api"]
     margin = raw.get("margin_thresholds", {})
     hedge = raw.get("spx_hedge", {})
+    hedge_etfs = raw.get("hedge_etfs", {})
     return Config(
         leveraged_etf_map=raw.get("leveraged_etf_map", {}),
         risk_free_rate=raw["risk_free_rate"],
+        hedge_fetch_timeout=raw.get("hedge_fetch_timeout", 5.0),
         ib_gateway_host=gateway["host"],
         ib_gateway_port=gateway["port"],
         ib_gateway_client_id=gateway["client_id"],
@@ -65,6 +77,8 @@ def load_config(path: Path) -> Config:
         spx_target_leverage=hedge.get("target_leverage", 1.0),
         spx_dividend_yield=hedge.get("spx_dividend_yield", 0.013),
         spx_warning_leverage=hedge.get("warning_leverage", 1.5),
+        hedge_etf_specs=hedge_etfs.get("candidates", []),
+        hedge_concentration_threshold=hedge_etfs.get("concentration_threshold", 0.6),
         _dividend_yield=raw.get("dividend_yield", {}),
         _beta_overrides=raw.get("beta_overrides", {}),
     )

@@ -344,6 +344,49 @@ def test_beta_weighted_exposure_defaults_missing_beta_to_one():
     assert out["defaulted"] == ["FOO"]
 
 
+def _etf_specs():
+    return [
+        {"symbol": "SPY", "label": "S&P 500", "broad": True, "defaultBeta": 1.0, "betas": {}},
+        {"symbol": "SMH", "label": "Semis", "broad": False, "defaultBeta": 0.0,
+         "betas": {"NVDA": 1.2, "AMD": 1.3}},
+    ]
+
+
+def test_etf_hedge_candidates_leverage_is_times_of_nlv():
+    positions = [{"type": "STK", "underlying": "NVDA", "quantity": 100, "notional": 100000.0}]  # +100k
+    out = calc.etf_hedge_candidates(positions, _etf_specs(), nlv=50000.0)
+    by = {c["symbol"]: c for c in out["candidates"]}
+    # SMH: 100000 * 1.2 = 120000 → 120000 / 50000 = 2.4× NLV
+    assert by["SMH"]["netExposure"] == pytest.approx(120000.0)
+    assert by["SMH"]["leverage"] == pytest.approx(2.4)
+    # SPY broad default 1.0: 100000 → 2.0× NLV
+    assert by["SPY"]["leverage"] == pytest.approx(2.0)
+
+
+def test_etf_hedge_candidates_recommends_concentrated_sector():
+    # Whole book is semis → SMH coverage 1.0 ≥ threshold → recommend the sector ETF.
+    positions = [
+        {"type": "STK", "underlying": "NVDA", "quantity": 1, "notional": 60000.0},
+        {"type": "STK", "underlying": "AMD", "quantity": 1, "notional": 40000.0},
+    ]
+    out = calc.etf_hedge_candidates(positions, _etf_specs(), nlv=100000.0, concentration_threshold=0.6)
+    assert out["recommended"] == "SMH"
+    assert out["recommendedReason"] == "concentrated"
+    smh = next(c for c in out["candidates"] if c["symbol"] == "SMH")
+    assert smh["coverage"] == pytest.approx(1.0)
+
+
+def test_etf_hedge_candidates_recommends_broad_when_diffuse():
+    # Mostly a non-semi name → SMH coverage below threshold → fall back to broad SPY.
+    positions = [
+        {"type": "STK", "underlying": "AAPL", "quantity": 1, "notional": 90000.0},
+        {"type": "STK", "underlying": "NVDA", "quantity": 1, "notional": 10000.0},
+    ]
+    out = calc.etf_hedge_candidates(positions, _etf_specs(), nlv=100000.0, concentration_threshold=0.6)
+    assert out["recommended"] == "SPY"
+    assert out["recommendedReason"] == "broad"
+
+
 def test_put_strike_for_delta_round_trips_through_bs_greeks():
     S, T, r, q, sigma = 5000.0, 90 / 365.0, 0.0425, 0.013, 0.20
     K = calc.put_strike_for_delta(S, 0.30, T, r, q, sigma)

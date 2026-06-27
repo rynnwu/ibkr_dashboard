@@ -222,6 +222,85 @@ def fetch_betas(
     return {sym: _beta_of(t) for sym, t in zip(symbols, tickers)}
 
 
+def fetch_hedge_market(
+    ib: IB,
+    beta_symbols: Iterable[str],
+    etf_symbols: Iterable[str],
+    *,
+    want_spx: bool = True,
+    timeout: float = 5.0,
+    grace: float = 3.0,
+    poll_interval: float = 0.5,
+    exchange: str = "SMART",
+    currency: str = "USD",
+) -> dict:
+    """Fetch all of the hedge-banner inputs (§12/§13) in **one concurrent bounded
+    wait** instead of serially:
+
+      - per-underlying **beta** vs SPX (fundamental-ratios tick 258, *streaming*),
+      - the **SPX cash-index level** (snapshot),
+      - candidate **hedge-ETF spot levels** (snapshot, for the §13 ×NLV / model
+        pricing).
+
+    Why this exists: previously ``fetch_betas`` (≤8s) and ``fetch_spx_level``
+    (≤10s) ran one after another, and on an account without
+    Reuters-fundamentals / index-data entitlement *each* burned its full timeout
+    (~20s of dead serial waiting; see DEBUG §1d). ib_insync is asyncio-based, so
+    here we fire every ``reqMktData`` up front and poll **once** — all the replies
+    stream in concurrently, the loop exits as soon as everything that *can* arrive
+    has, and an unentitled account costs a single ``timeout`` window, not the sum.
+
+    Returns ``{betas: {sym -> beta|None}, spxLevel: float(NaN if none),
+    etfLevels: {sym -> level|None}}``. Read-only — no order methods. Mirrors the
+    bounded/polled wait + cancel discipline of ``fetch_market_data`` (DESIGN G9)
+    but is kept separate so the proven price-snapshot path is untouched."""
+    beta_symbols = list(beta_symbols)
+    etf_symbols = list(etf_symbols)
+    beta_contracts = [Stock(s, exchange, currency) for s in beta_symbols]
+    etf_contracts = [Stock(s, exchange, currency) for s in etf_symbols]
+    spx = Index("SPX", "CBOE", "USD") if want_spx else None
+
+    to_qualify: list = [*beta_contracts, *etf_contracts] + ([spx] if spx is not None else [])
+    if to_qualify:
+        ib.qualifyContracts(*to_qualify)
+
+    # Streaming (258) for betas — the ratios tick isn't delivered on a snapshot;
+    # plain snapshots for the index/ETF marks.
+    beta_tickers = [ib.reqMktData(c, "258", snapshot=False) for c in beta_contracts]
+    etf_tickers = [ib.reqMktData(c, "", snapshot=True) for c in etf_contracts]
+    spx_ticker = ib.reqMktData(spx, "", snapshot=True) if spx is not None else None
+
+    all_contracts: list = [*beta_contracts, *etf_contracts] + ([spx] if spx is not None else [])
+    grace = min(grace, timeout)
+    try:
+        elapsed = 0.0
+        while elapsed < timeout:
+            ib.sleep(poll_interval)
+            elapsed += poll_interval
+            betas_ready = all(_beta_of(t) is not None for t in beta_tickers)
+            etf_ready = all(not math.isnan(mark_price(t)) for t in etf_tickers)
+            spx_ready = spx_ticker is None or not math.isnan(mark_price(spx_ticker))
+            if betas_ready and etf_ready and spx_ready:
+                break
+            # The ETF spot snapshots are the reliably-fast marks. Once they're in,
+            # don't let the maybe-absent fundamentals (tick 258, no entitlement →
+            # never arrives) or an intermittent index quote hold the wait to the
+            # full ceiling — proceed after a short grace with whatever has landed.
+            if etf_ready and elapsed >= grace:
+                break
+    finally:
+        for c in all_contracts:
+            ib.cancelMktData(c)
+
+    betas = {s: _beta_of(t) for s, t in zip(beta_symbols, beta_tickers)}
+    etf_levels = {
+        s: (None if math.isnan(mark_price(t)) else mark_price(t))
+        for s, t in zip(etf_symbols, etf_tickers)
+    }
+    spx_level = mark_price(spx_ticker) if spx_ticker is not None else math.nan
+    return {"betas": betas, "spxLevel": spx_level, "etfLevels": etf_levels}
+
+
 def fetch_spx_level(ib: IB, timeout: float = 10.0, poll_interval: float = 0.5) -> float:
     """Snapshot mark for the SPX cash index (NaN if it never priced). Read-only."""
     spx = Index("SPX", "CBOE", "USD")

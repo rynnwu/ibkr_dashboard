@@ -379,6 +379,95 @@ def beta_weighted_exposure(positions: list[dict], betas: dict[str, float], defau
     return {"netBetaWeightedExposure": net, "breakdown": breakdown, "defaulted": defaulted}
 
 
+def etf_hedge_candidates(
+    positions: list[dict],
+    etf_specs: list[dict],
+    nlv: float,
+    concentration_threshold: float = 0.6,
+    levels: dict[str, float] | None = None,
+) -> dict:
+    """Compare candidate hedge ETFs (e.g. SPY / QQQ / SMH) against the portfolio's
+    net signed dollar-delta, to (1) suggest which instrument best fits the book and
+    (2) express the current exposure as a multiple of NLV in each ETF's own terms.
+    Pure — no I/O; a config-driven order-of-magnitude guide like the SPX hedge.
+
+    Each ``etf_specs`` entry is ``{symbol, label, broad: bool, defaultBeta: float,
+    betas: {underlying -> beta vs this ETF}}``. A holding is *covered* by an ETF
+    when it has an explicit ``betas`` entry (i.e. it sits in that ETF's universe);
+    otherwise ``defaultBeta`` applies (≈1.0 for the broad market, ≈0 for a sector
+    ETF whose universe the name is outside of).
+
+    For each ETF E, over per-underlying signed dollar-delta ``s_u``
+    (:func:`signed_dollar_delta`, long +, short −):
+
+      - ``netExposure`` = Σ_u s_u · beta(u, E)        — exposure beta-weighted to E
+      - ``leverage``    = netExposure / NLV           — "times of NLV right now"
+      - ``coverage``    = Σ_{u in E} |s_u| / Σ_u |s_u| — the share of the book's
+        gross directional exposure that lives in E's universe
+
+    ``levels`` (optional) maps an ETF symbol to its current spot price; surfaced
+    per candidate as ``level`` (None when absent) so the hedge what-if can model-
+    price against the chosen ETF.
+
+    Recommendation: the most-covering *sector* ETF whose coverage ≥
+    ``concentration_threshold`` (a tighter, cheaper hedge for a concentrated book),
+    otherwise the broad-market ETF. Returns ``{candidates: [...] sorted by coverage
+    desc, recommended: symbol|None, recommendedReason}``."""
+    levels = levels or {}
+    by_underlying: dict[str, float] = {}
+    for pos in positions:
+        by_underlying[pos["underlying"]] = by_underlying.get(pos["underlying"], 0.0) + signed_dollar_delta(pos)
+    gross = sum(abs(v) for v in by_underlying.values())
+
+    candidates = []
+    for spec in etf_specs:
+        betas = spec.get("betas", {})
+        broad = bool(spec.get("broad"))
+        default_beta = spec.get("defaultBeta", 1.0 if broad else 0.0)
+        net = 0.0
+        covered_gross = 0.0
+        covered_syms: list[str] = []
+        for underlying, signed in by_underlying.items():
+            # A broad-market ETF represents the whole book (every name carries
+            # market beta), so it "covers" all underlyings; a sector ETF only
+            # covers names that have an explicit beta entry (in its universe).
+            if underlying in betas or broad:
+                covered_gross += abs(signed)
+                covered_syms.append(underlying)
+            net += signed * betas.get(underlying, default_beta)
+        candidates.append({
+            "symbol": spec["symbol"],
+            "label": spec.get("label", spec["symbol"]),
+            "broad": broad,
+            "netExposure": net,
+            "leverage": net / nlv if nlv else 0.0,
+            "coverage": covered_gross / gross if gross else 0.0,
+            "coveredSymbols": sorted(covered_syms),
+            "level": levels.get(spec["symbol"]),
+        })
+
+    # Recommend the most-concentrated good sector fit, else the broad market.
+    sectors = [c for c in candidates if not c["broad"]]
+    broad = next((c for c in candidates if c["broad"]), None)
+    best_sector = max(sectors, key=lambda c: c["coverage"], default=None)
+    if best_sector and best_sector["coverage"] >= concentration_threshold:
+        recommended, reason = best_sector["symbol"], "concentrated"
+    elif broad:
+        recommended, reason = broad["symbol"], "broad"
+    elif best_sector:
+        recommended, reason = best_sector["symbol"], "fallback"
+    else:
+        recommended, reason = None, "none"
+
+    candidates.sort(key=lambda c: c["coverage"], reverse=True)
+    return {
+        "candidates": candidates,
+        "recommended": recommended,
+        "recommendedReason": reason,
+        "concentrationThreshold": concentration_threshold,
+    }
+
+
 def put_strike_for_delta(
     S: float, target_delta: float, T: float, r: float, q: float, sigma: float
 ) -> float:

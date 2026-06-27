@@ -443,6 +443,68 @@ def test_spx_hedge_endpoint_503_when_no_cache_and_no_fallback(monkeypatch):
     assert "SPX" in resp.json()["detail"]
 
 
+def test_spx_hedge_endpoint_echoes_spx_symbol_by_default(monkeypatch):
+    # Absent `symbol` behaves as "SPX" and is echoed back.
+    monkeypatch.setattr(main.spx_cache, "load_spx", lambda *a, **k: None)
+    client = TestClient(main.app)
+    resp = client.post("/api/spx-hedge", json={
+        "netExposure": 1_000_000.0, "nlv": 500_000.0, "spxLevel": 5000.0,
+    })
+    assert resp.status_code == 200
+    assert resp.json()["symbol"] == "SPX"
+
+
+def test_spx_hedge_endpoint_explicit_spx_symbol_uses_cache(monkeypatch):
+    # symbol="SPX" keeps the exact SPX behavior (resolve from cache, ignore `level`).
+    fake_cache = {
+        "spxLevel": 5200.0, "expirations": [], "strikes": [],
+        "iv": 0.18, "source": "live", "cachedAt": "2026-06-27T09:30:00+08:00",
+    }
+    monkeypatch.setattr(main.spx_cache, "load_spx", lambda *a, **k: fake_cache)
+    client = TestClient(main.app)
+    resp = client.post("/api/spx-hedge", json={
+        "netExposure": 1_000_000.0, "nlv": 500_000.0, "symbol": "SPX",
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["symbol"] == "SPX"
+    assert body["source"] == "live"
+    assert body["spxLevel"] == 5200.0
+
+
+def test_spx_hedge_endpoint_etf_symbol_model_prices_off_request_level(monkeypatch):
+    # A non-SPX ETF builds the market straight from the request (model pricing) and
+    # does NOT touch the SPX cache; `level` becomes the spot, `dividendYield` the q.
+    def _no_cache(*a, **k):
+        raise AssertionError("ETF hedge must not read the SPX cache")
+
+    monkeypatch.setattr(main.spx_cache, "load_spx", _no_cache)
+    client = TestClient(main.app)
+    resp = client.post("/api/spx-hedge", json={
+        "netExposure": 600_000.0, "nlv": 300_000.0,
+        "symbol": "SMH", "level": 250.0, "dividendYield": 0.0,
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["symbol"] == "SMH"
+    assert body["source"] == "model"
+    assert body["cachedAt"] is None
+    assert body["spxLevel"] == 250.0  # the ETF spot is the underlying level
+    assert body["leverageBefore"] == pytest.approx(2.0)
+    assert body["contracts"] > 0
+    assert [p["kind"] for p in body["proposals"]] == ["long_put", "vertical", "seagull"]
+
+
+def test_spx_hedge_endpoint_etf_symbol_503_without_level():
+    # A non-SPX ETF needs a spot price; missing/≤0 level → friendly 503 (model mode).
+    client = TestClient(main.app)
+    resp = client.post("/api/spx-hedge", json={
+        "netExposure": 600_000.0, "nlv": 300_000.0, "symbol": "SMH",
+    })
+    assert resp.status_code == 503
+    assert "現價" in resp.json()["detail"]
+
+
 def test_build_portfolio_response_carries_beta_weighted_fields():
     positions = [
         {"label": "NVDA", "underlying": "NVDA", "type": "STK", "notional": 50000.0,

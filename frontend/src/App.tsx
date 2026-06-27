@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import DonutChart from "./components/DonutChart";
 import RollWhatIf from "./components/RollWhatIf";
 import SpxHedge from "./components/SpxHedge";
+import EtfHedgeTable from "./components/EtfHedgeTable";
 import useIsMobile from "./hooks/useIsMobile";
 import { fetchPortfolio } from "./api";
 import type { PortfolioResponse, UnderlyingRow, PositionRow, MarginSummary } from "./types";
@@ -271,6 +272,7 @@ export default function App() {
       )}
 
       <RollWhatIf data={data} />
+      <EtfHedgeTable data={data} />
       <SpxHedge data={data} />
 
       <div style={{ display: "flex", justifyContent: "center", padding: "14px 0 6px", gap: 8 }}>

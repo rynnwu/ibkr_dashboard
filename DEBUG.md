@@ -40,10 +40,11 @@ Interpreting command 1:
 
 ## 1b. "載入中… forever" — alive or hung?
 
-**A refresh takes ~10s** (DESIGN §9: market data is fetched in one batched call
-with a single bounded wait; gotcha G9). The first request after a gateway
-(re)connect can run longer while IB's market-data lines warm up. So `載入中…`
-for ~10–25s is **normal**, not a hang; past ~30s, suspect a real stall. Before
+**A warm refresh takes ~15–20s** (DESIGN §9: market data is fetched in one batched
+call with a single bounded wait, gotcha G9 — ~16s of that is the market-data wait;
+plus the §12/§13 hedge-market fetch ~4–5s). The **first** request after a gateway
+(re)connect runs longer (~30s) while IB's market-data lines warm up. So `載入中…`
+for ~15–30s is **normal**, not a hang; past ~35s, suspect a real stall. Before
 assuming it's stuck, prove it's making progress:
 
 ```bash
@@ -63,13 +64,16 @@ tail -5 logs/ibkr_piechart_backend.log   # reqId N increasing = progressing
 
 **Alive** = process up + ESTABLISHED socket to 4001 + log mtime within seconds +
 reqId climbing. **Genuinely hung** = no ESTABLISHED socket and log mtime stale
-for minutes → then investigate (gateway dropped, deadlock). The `Error 10091 ...
-requires additional subscription` lines scrolling by are *expected* per-option
-noise (DESIGN G4), not a stall.
+for minutes → then investigate (gateway dropped, deadlock). Two kinds of log line
+scrolling by are **expected** noise, not a stall: `Error 10091 ... requires
+additional subscription` (per-option, no OPRA feed — DESIGN G4) and `Error 10358 ...
+Fundamentals data is not allowed` (the §12 beta fetch, tick 258, on an account
+with no Reuters-fundamentals entitlement — betas then fall back to config
+`beta_overrides` / 1.0; see §3 below).
 
-> Market data is batched into one bounded wait (DESIGN §9, gotcha G9), so a
-> refresh is ~10s. If it's now consistently minutes, that's a regression worth
-> investigating — not the old "slow by design" behavior.
+> A warm refresh is ~15–20s (market-data wait ~16s + concurrent hedge-market fetch
+> ~4–5s; DESIGN §9/§12, gotcha G9). If it's now consistently **minutes**, that's a
+> regression worth investigating — not the old "slow by design" behavior.
 
 ## 1c. Where logs live
 
@@ -104,6 +108,8 @@ Bisect by asking, in order:
 | `Error 326 ... client id is already in use` then `API connection failed: TimeoutError()` → `503` | Two `/api/portfolio` connects overlap on the **fixed clientId** (`config.json` `client_id`). React `<StrictMode>` double-invokes the mount effect → two ~10s requests at once; rapid 重試 does the same. | **Fixed:** `ibkr_client.connect()` now tries the configured id then random fallback ids; `App.tsx` guards against concurrent loads. See §4. |
 | `API connection failed: TimeoutError()` with **no** prior 326, gateway port not listening | Gateway not running / not logged in / wrong port. | Start + log into IB Gateway (IB API mode, port 4001). Config: `config.json > ib_gateway`. |
 | `Error 10091 ... requires additional subscription` on an **Option** | Account has no live/OPRA options feed. **Expected** — not fatal. | By design (DESIGN G4): we use a plain snapshot + previous close + Black-Scholes. Position only fails if even `close` is NaN. |
+| `Error 10358 ... Fundamentals data is not allowed` on a **Stock** | Account has no Reuters-fundamentals entitlement, so the §12 beta fetch (tick 258) gets no data. **Expected** — not fatal. | By design: beta falls back to config `beta_overrides` → 1.0 (defaulted symbols surface in `warnings[]`). The concurrent `fetch_hedge_market` grace-exits instead of waiting the full ceiling for betas that will never arrive. |
+| Refresh **~28s+** (was ~15s), no error, 200 OK | **Regression (now fixed).** The §12 hedge added `fetch_betas` (≤8s) + `fetch_spx_level` (≤10s) **serially**; on an unentitled account each burned its *full* timeout (~20s of dead serial waiting). | **Fixed:** one concurrent `ibkr_client.fetch_hedge_market()` (betas + SPX level + ETF spots in a single bounded wait, grace early-exit) + `hedge_fetch_timeout` (default 5s). Hedge block ~20s → ~4–5s; warm refresh back to ~15–20s. See DESIGN §12 "concurrent hedge-market fetch". |
 | `ValueError: no valid option mark price for ...` → that symbol in `warnings[]` | No usable mark (no live data **and** no `close`, e.g. illiquid/just-listed option). | Per-position warning, does **not** sink the request (DESIGN G7). Tolerate or add data entitlement. |
 | `There is no current event loop` | asyncio loop missing in the FastAPI worker thread. | Already handled in `connect()` (DESIGN G1). If it recurs, that guard regressed. |
 | Browser shows broken icons, API is 200 | `iconUrl` not served over HTTP. | Icons are mounted at `/icons` (DESIGN G6); check `StaticFiles` mount + `icon_cache/`. |

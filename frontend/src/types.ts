@@ -44,6 +44,28 @@ export interface MarginSummary {
   canOpenNew?: boolean;
 }
 
+// One candidate hedge ETF compared against the book (DESIGN §13). `leverage` is
+// the current exposure (beta-weighted to this ETF) as a multiple of NLV.
+export interface EtfHedgeCandidate {
+  symbol: string;
+  label: string;
+  broad: boolean;
+  netExposure: number;
+  leverage: number; // × NLV
+  coverage: number; // 0–1: share of the book's gross exposure in this ETF's universe
+  coveredSymbols: string[];
+  // Current ETF spot price (null when not fetched this session); used by the
+  // hedge what-if to model-price against the chosen ETF.
+  level: number | null;
+}
+
+export interface EtfHedge {
+  candidates: EtfHedgeCandidate[]; // sorted by coverage desc
+  recommended: string | null; // suggested ETF symbol
+  recommendedReason: "concentrated" | "broad" | "fallback" | "none";
+  concentrationThreshold: number;
+}
+
 export interface PortfolioResponse {
   nlv: number;
   totalNotional: number;
@@ -60,6 +82,8 @@ export interface PortfolioResponse {
   spxLevel: number;
   // Beta-weighted leverage above which the hedge-suggestion banner shows.
   spxHedgeWarningLeverage: number;
+  // I/O-free ETF-hedge comparison (which ETF fits the book + ×NLV per ETF).
+  etfHedge: EtfHedge;
   underlyings: UnderlyingRow[];
   positions: PositionRow[];
   // Margin-buffer snapshot; null when account margin values were unavailable
@@ -166,6 +190,12 @@ export interface SpxHedgeRequest {
   targetDte?: number; // treated as an upper cap on the chosen expiry's DTE
   assumedIv?: number; // percent
   spxLevel?: number; // fallback if no live SPX cache this session
+  // Hedge-instrument selection (DESIGN §13). Absent/"SPX" → SPX-put hedge (market
+  // from cache). For a non-SPX ETF: `symbol` = its ticker, `level` = its spot
+  // (required, model pricing), `dividendYield` = its yield (q).
+  symbol?: string;
+  level?: number;
+  dividendYield?: number;
 }
 
 export interface HedgeLeg {
@@ -207,4 +237,6 @@ export interface SpxHedgeResult {
   cachedAt: string | null; // when the SPX market snapshot was taken
   targetDelta: number;
   floorPutDelta: number;
+  // The hedge instrument this result was sized against ("SPX" or an ETF ticker).
+  symbol: string;
 }
